@@ -26,7 +26,7 @@ let _logFile: string | null = null;
 const getLogFile = (): string | null => {
   if (_logFile) return _logFile;
   try {
-    _logFile = path.join(app.getPath('documents'), 'natively_debug.log');
+    _logFile = path.join(app.getPath('documents'), 'sensi_debug.log');
     return _logFile;
   } catch {
     // app.ready not yet fired — return null, logToFile will skip silently
@@ -102,6 +102,22 @@ async function ensureMacMicrophoneAccess(context: string): Promise<boolean> {
  *   - 'not-determined':  macOS will show the dialog when SCK/CoreAudio tap runs.
  *   - 'restricted':      managed device policy — nothing we can do programmatically.
  */
+// sensi M8 / PASS B: scrub access/refresh token query params before logging
+// a sensi://auth/callback URL. The OS-level logs (second-instance argv,
+// macOS open-url) would otherwise leak tokens into sensi_debug.log.
+function redactCallback(url: string): string {
+  try {
+    const u = new URL(url);
+    const sensitive = ['access', 'refresh', 'google_access', 'google_refresh'];
+    for (const k of sensitive) {
+      if (u.searchParams.has(k)) u.searchParams.set(k, '<redacted>');
+    }
+    return u.toString();
+  } catch {
+    return '<unparseable sensi:// url>';
+  }
+}
+
 function getMacScreenCaptureStatus(): 'granted' | 'denied' | 'not-determined' | 'restricted' {
   if (process.platform !== 'darwin') return 'granted';
   
@@ -163,14 +179,17 @@ import { DeepgramStreamingSTT } from "./audio/DeepgramStreamingSTT"
 import { SonioxStreamingSTT } from "./audio/SonioxStreamingSTT"
 import { ElevenLabsStreamingSTT } from "./audio/ElevenLabsStreamingSTT"
 import { OpenAIStreamingSTT } from "./audio/OpenAIStreamingSTT"
-import { NativelyProSTT } from "./audio/NativelyProSTT"
+// sensi M0-T5: NativelyProSTT removed from the STT provider registry. The file
+// still exists under electron/audio/NativelyProSTT.ts but is no longer imported
+// or instantiated. Users with sttProvider === 'natively' in stored credentials
+// now fall through to the default GoogleSTT branch in createSTTProvider().
 import { ThemeManager } from "./ThemeManager"
 import { RAGManager } from "./rag/RAGManager"
 import { DatabaseManager } from "./db/DatabaseManager"
 import { warmupIntentClassifier } from "./llm"
 
 /** Unified type for all STT providers with optional extended capabilities */
-type STTProvider = (GoogleSTT | RestSTT | DeepgramStreamingSTT | SonioxStreamingSTT | ElevenLabsStreamingSTT | OpenAIStreamingSTT | NativelyProSTT) & {
+type STTProvider = (GoogleSTT | RestSTT | DeepgramStreamingSTT | SonioxStreamingSTT | ElevenLabsStreamingSTT | OpenAIStreamingSTT) & {
   finalize?: () => void;
   setAudioChannelCount?: (count: number) => void;
   notifySpeechEnded?: () => void;
@@ -238,6 +257,7 @@ export class AppState {
 
   private hasDebugged: boolean = false
   private isMeetingActive: boolean = false; // Guard for session state leaks
+  private meetingStartedAt: number | null = null; // v2.16.0: for STT usage-reporting
   private _isQuitting: boolean = false;
   private _verboseLogging: boolean = false;
   private _disguiseTimers: NodeJS.Timeout[] = []; // Track forceUpdate timeouts
@@ -288,6 +308,25 @@ export class AppState {
     this.settingsWindowHelper.setContentProtection(this.isUndetectable);
     this.modelSelectorWindowHelper.setContentProtection(this.isUndetectable);
     this.cropperWindowHelper.setContentProtection(this.isUndetectable);
+
+    // v2.16.2: probe Windows build so the renderer can warn users whose OS
+    // can't actually honour WDA_EXCLUDEFROMCAPTURE (modern DXGI-based
+    // screen sharing will still see sensi). Log at startup so support has
+    // the data; renderer queries the probe via IPC and surfaces a toast
+    // when Undetectable is toggled on an incapable OS.
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { probeStealthCapability } = require('./utils/stealthCapability') as typeof import('./utils/stealthCapability');
+      const probe = probeStealthCapability();
+      console.log(
+        `[AppState] Stealth capability: ${probe.capability} (platform=${probe.platform}, release=${probe.osRelease}, build=${probe.buildNumber ?? 'n/a'})`
+      );
+      if (probe.warning) {
+        console.warn(`[AppState] Stealth warning: ${probe.warning}`);
+      }
+    } catch (err) {
+      console.warn('[AppState] Stealth probe failed:', (err as Error)?.message);
+    }
 
     if (process.platform === 'win32' || process.platform === 'darwin') {
       this.cropperWindowHelper.preload();
@@ -462,7 +501,9 @@ export class AppState {
     this.setupAutoUpdater()
   }
 
-  private broadcast(channel: string, ...args: any[]): void {
+  // Public so new features (pre-meeting alerts, etc.) can push events to the
+  // renderer without threading through additional private helpers.
+  public broadcast(channel: string, ...args: any[]): void {
     BrowserWindow.getAllWindows().forEach(win => {
       if (!win.isDestroyed()) {
         win.webContents.send(channel, ...args);
@@ -484,6 +525,14 @@ export class AppState {
 
   private broadcastMeetingState(): void {
     this.broadcast('meeting-state-changed', { isActive: this.isMeetingActive });
+    // M6-A: inform LiveScreenCapture so it can start/stop its timer.
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { LiveScreenCapture } = require('./services/LiveScreenCapture') as typeof import('./services/LiveScreenCapture');
+      LiveScreenCapture.getInstance().onMeetingStateChanged(this.isMeetingActive);
+    } catch (err) {
+      console.warn('[Main] LiveScreenCapture state update failed:', err);
+    }
   }
 
   private async bootstrapOllamaEmbeddings() {
@@ -603,6 +652,22 @@ export class AppState {
   }
 
   private setupAutoUpdater(): void {
+    // PACKAGING-01 (D031): auto-updater runs automatically in packaged
+    // builds (installed .exe / .dmg / .AppImage) so users receive OTA
+    // updates from GitHub Releases. In dev mode (`npm run app:dev`) the
+    // updater stays off to avoid hammering the feed while iterating.
+    // The env-var opt-in (SENSI_ENABLE_UPDATER) is still honoured so a
+    // developer can force the check locally without packaging.
+    //
+    // Historical note: D005 originally kept the updater off by default.
+    // PACKAGING-01 flips that default only for packaged builds — the
+    // rationale that motivated D005 (no stray network calls while
+    // auditing the fork) is satisfied because dev-mode stays off.
+    if (!app.isPackaged && process.env.SENSI_ENABLE_UPDATER !== 'true') {
+      console.log('[AutoUpdater] Disabled in dev mode (set SENSI_ENABLE_UPDATER=true to force on).')
+      return
+    }
+
     autoUpdater.autoDownload = false
     autoUpdater.autoInstallOnAppQuit = false  // Manual install only via button
 
@@ -656,7 +721,9 @@ export class AppState {
       this.broadcast("update-downloaded", info)
     })
 
-    // Start checking for updates with a 10-second delay
+    // Check for updates shortly after boot — 3 s is enough for the window
+    // to paint and the network to settle, but short enough that the user
+    // actually sees the update modal if one is available.
     setTimeout(() => {
       if (process.env.NODE_ENV === "development") {
         console.log("[AutoUpdater] Development mode: Skipping auto check (use manual button)");
@@ -665,7 +732,22 @@ export class AppState {
           console.error("[AutoUpdater] Failed to check for updates:", err);
         });
       }
-    }, 10000);
+    }, 3000);
+
+    // Re-check whenever the launcher regains focus, throttled to once every
+    // 10 min so long-running sessions still surface fresh releases without
+    // hammering GitHub. Covers the case where the user leaves sensi open
+    // for hours and a new version ships in between.
+    let lastFocusCheck = Date.now();
+    const FOCUS_CHECK_INTERVAL_MS = 10 * 60 * 1000;
+    app.on('browser-window-focus', () => {
+      if (process.env.NODE_ENV === 'development') return;
+      if (Date.now() - lastFocusCheck < FOCUS_CHECK_INTERVAL_MS) return;
+      lastFocusCheck = Date.now();
+      autoUpdater.checkForUpdatesAndNotify().catch(() => {
+        // Silent: next focus will retry. Don't spam the log.
+      });
+    });
   }
 
   private async checkForUpdatesManual(): Promise<void> {
@@ -754,10 +836,14 @@ export class AppState {
       }
     }
 
-    // Fallback to standard quitAndInstall (works on Windows/Linux or if signed)
+    // Fallback to standard quitAndInstall (works on Windows/Linux or if signed).
+    // isSilent=true  → NSIS runs with /S, no wizard window, invisible file swap.
+    // isForceRunAfter=true → relaunch the app automatically post-install.
+    // Combined with `nsis.oneClick: true` in package.json this is the
+    // Claude/VS Code-style instant update experience.
     setImmediate(() => {
       try {
-        autoUpdater.quitAndInstall(false, true)
+        autoUpdater.quitAndInstall(true, true)
       } catch (err) {
         console.error('[AutoUpdater] quitAndInstall failed:', err)
         app.exit(0)
@@ -816,25 +902,32 @@ export class AppState {
 
     let stt: STTProvider;
 
-    if (sttProvider === 'natively') {
-      const nativelyKey = CredentialsManager.getInstance().getNativelyApiKey();
-      if (!nativelyKey) {
-        // Natively is Coming Soon — no key means degrade gracefully like every other provider
-        console.warn(`[Main] No Natively API Key configured for ${speaker}, falling back to GoogleSTT`);
-        stt = new GoogleSTT(speaker);
-      } else {
-        // 'system' for interviewer (system audio), 'mic' for user (microphone).
-        // The server uses ${key}:${channel} as the session key so both streams
-        // can coexist without triggering concurrent_session_blocked.
-        stt = new NativelyProSTT(nativelyKey, speaker === 'interviewer' ? 'system' : 'mic');
-      }
-    } else if (sttProvider === 'deepgram') {
+    // sensi M0-T5: the 'natively' STT branch was removed. Any stored
+    // sttProvider === 'natively' value now falls through the else-if chain
+    // below and ends at the final GoogleSTT fallback.
+    if (sttProvider === 'deepgram') {
       const apiKey = CredentialsManager.getInstance().getDeepgramApiKey();
-      if (apiKey) {
-        console.log(`[Main] Using DeepgramStreamingSTT for ${speaker}`);
-        stt = new DeepgramStreamingSTT(apiKey);
+      // v2.16.0: signed-in users with no BYOK Deepgram key (or who
+      // explicitly opted into Sensi Audio) get a server-minted scoped
+      // key instead. Token-getter is resolved on every (re)connect so
+      // the cache auto-refreshes around the 24 h TTL.
+      let tokenGetter: (() => Promise<string>) | undefined;
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const { AuthManager } = require('./services/AuthManager') as typeof import('./services/AuthManager');
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const { SensiSTTTokenClient } = require('./services/SensiSTTTokenClient') as typeof import('./services/SensiSTTTokenClient');
+        if (AuthManager.getInstance().getAuthState().signedIn && !apiKey) {
+          tokenGetter = () => SensiSTTTokenClient.getInstance().getToken();
+        }
+      } catch { /* AuthManager not ready — fall through to BYOK */ }
+
+      if (apiKey || tokenGetter) {
+        const mode = tokenGetter ? 'managed' : 'BYOK';
+        console.log(`[Main] Using DeepgramStreamingSTT for ${speaker} (${mode})`);
+        stt = new DeepgramStreamingSTT(apiKey ?? '', tokenGetter);
       } else {
-        console.warn(`[Main] No API key for Deepgram STT, falling back to GoogleSTT`);
+        console.warn(`[Main] No Deepgram key + not signed in, falling back to GoogleSTT`);
         stt = new GoogleSTT(speaker);
       }
     } else if (sttProvider === 'soniox') {
@@ -938,17 +1031,19 @@ export class AppState {
       console.error(`[Main] STT (${speaker}) Error:`, err);
     });
 
-    // Auto language detection: NativelyProSTT emits 'languageDetected' when the
-    // backend resolves the language from the first audio batch. Notify the renderer
-    // so the settings UI can show what was detected.
-    if (stt instanceof NativelyProSTT) {
-      stt.on('languageDetected', (bcp47: string) => {
-        console.log(`[Main] STT language auto-detected (${speaker}): ${bcp47}`);
-        const helper = this.getWindowHelper();
-        helper.getMainWindow()?.webContents.send('stt-language-auto-detected', bcp47);
-        helper.getLauncherWindow()?.webContents.send('stt-language-auto-detected', bcp47);
-      });
-    }
+    // v2.15.0: Deepgram emits an `utterance-end` event when its own VAD
+    // confirms the speaker has stopped. The intelligence layer uses this
+    // as the reliable turn-end signal (replaces our blind silence timer
+    // when Deepgram is the active STT).
+    stt.on('utterance-end', () => {
+      if (!this.isMeetingActive) return;
+      if (speaker !== 'interviewer') return; // only interviewer turn-ends drive auto-answer
+      this.intelligenceManager.handleUtteranceEnd?.();
+    });
+
+    // sensi M0-T5: the NativelyProSTT auto-language-detection wiring was
+    // removed along with the provider registry branch. No other STT provider
+    // emits 'languageDetected', so no replacement is needed.
 
     return stt;
   }
@@ -1316,7 +1411,12 @@ export class AppState {
         const count = len / (2 * step);
         if (count > 0) {
           const rms = Math.sqrt(sum / count);
-          const level = Math.min(rms / 10000, 1.0);
+          // v2.5.2: more sensitive scaling so normal speech (~RMS 1500-4000)
+          // reads clearly on the meter. Previous /10000 put normal speech
+          // at 15-40% which users perceived as "mic not detecting." Combined
+          // with an idle-decay timer on the renderer side so the meter
+          // visibly falls during silence between VAD-gated bursts.
+          const level = Math.min(rms / 2500, 1.0);
           for (const target of targets) {
             target.webContents.send('audio-test-level', level);
           }
@@ -1397,7 +1497,7 @@ export class AppState {
         // auto-open System Settings. Forcing that window open every meeting start
         // is extremely disruptive, especially when mic transcription is still working.
         // The UI will show a non-blocking banner; the user can fix it deliberately.
-        const message = 'Screen Recording permission denied. System audio will not be captured. To fix: System Settings → Privacy & Security → Screen Recording → enable Natively.';
+        const message = 'Screen Recording permission denied. System audio will not be captured. To fix: System Settings → Privacy & Security → Screen Recording → enable sensi.';
         console.warn('[Main]', message);
         this.broadcast('system-audio-permission-denied', message);
         // NOTE: Do NOT call shell.openExternal() here — it hijacks focus on every meeting
@@ -1408,6 +1508,7 @@ export class AppState {
     }
 
     this.isMeetingActive = true;
+    this.meetingStartedAt = Date.now();
     this.broadcastMeetingState()
     if (metadata) {
       this.intelligenceManager.setMeetingMetadata(metadata);
@@ -1478,16 +1579,53 @@ export class AppState {
     this.isMeetingActive = false; // Block new data immediately
     this.broadcastMeetingState();
 
+    // v2.16.0: report STT seconds to the backend so `daily_usage.stt_seconds`
+    // accumulates and the cap is enforced on next /stt/token mint. Only
+    // fires when we actually used managed STT (token getter path) —
+    // BYOK users don't report (their Deepgram billing is their own).
+    // Fire-and-forget, errors swallowed inside the client.
+    if (this.meetingStartedAt !== null) {
+      const elapsedSec = Math.max(0, Math.round((Date.now() - this.meetingStartedAt) / 1000));
+      this.meetingStartedAt = null;
+      try {
+        const { CredentialsManager } = require('./services/CredentialsManager');
+        const sttProvider = CredentialsManager.getInstance().getSttProvider();
+        const hasByokDeepgram = !!CredentialsManager.getInstance().getDeepgramApiKey();
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const { AuthManager } = require('./services/AuthManager') as typeof import('./services/AuthManager');
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const { SensiSTTTokenClient } = require('./services/SensiSTTTokenClient') as typeof import('./services/SensiSTTTokenClient');
+        if (sttProvider === 'deepgram' && !hasByokDeepgram && AuthManager.getInstance().getAuthState().signedIn) {
+          void SensiSTTTokenClient.getInstance().reportUsage(elapsedSec);
+        }
+      } catch (err) {
+        console.warn('[Main] STT usage-report wiring failed:', (err as Error)?.message);
+      }
+    }
+
     // Reset Mouse Passthrough so the next meeting overlay starts fresh and focusable
     if (this.overlayMousePassthrough) {
       this.setOverlayMousePassthrough(false);
     }
 
-    // Stop audio captures synchronously — these are fire-and-forget internally
-    this.systemAudioCapture?.stop();
-    this.googleSTT?.stop();
-    this.microphoneCapture?.stop();
-    this.googleSTT_User?.stop();
+    // v2.6.1 perf fix: the Rust NAPI MicrophoneCapture.stop() synchronously
+    // joins the capture thread, which can take 4-5 s on Windows. Running it
+    // synchronously here blocks the launcher transition and leaves the user
+    // staring at a frozen overlay. Since `isMeetingActive = false` above
+    // already blocks any in-flight chunk from reaching STT, there is no
+    // correctness dependency on the stops completing before we return.
+    // Push them to setImmediate so the UI can transition immediately; the
+    // native thread winds down in the background.
+    const sysCap = this.systemAudioCapture;
+    const micCap = this.microphoneCapture;
+    const sysStt = this.googleSTT;
+    const micStt = this.googleSTT_User;
+    setImmediate(() => {
+      try { sysCap?.stop(); } catch (e) { console.error('[Main] sysCap stop failed:', e); }
+      try { sysStt?.stop(); } catch (e) { console.error('[Main] sysStt stop failed:', e); }
+      try { micCap?.stop(); } catch (e) { console.error('[Main] micCap stop failed:', e); }
+      try { micStt?.stop(); } catch (e) { console.error('[Main] micStt stop failed:', e); }
+    });
 
     // Save session state and reset context — MeetingPersistence.stopMeeting() is
     // already fire-and-forget internally (processAndSaveMeeting runs in background).
@@ -1721,9 +1859,9 @@ export class AppState {
     const { CredentialsManager } = require('./services/CredentialsManager');
     CredentialsManager.getInstance().setSttLanguage(key);
 
-    // 'auto' is only meaningful for NativelyProSTT — other providers fall back to en-US.
-    const sttProvider = CredentialsManager.getInstance().getSttProvider();
-    const effectiveKey = (key === 'auto' && sttProvider !== 'natively') ? 'english-us' : key;
+    // sensi M0-T5: 'auto' was only meaningful for NativelyProSTT, which is
+    // no longer registered. All remaining providers fall back to 'english-us'.
+    const effectiveKey = key === 'auto' ? 'english-us' : key;
 
     this.googleSTT?.setRecognitionLanguage(effectiveKey);
     this.googleSTT_User?.setRecognitionLanguage(effectiveKey);
@@ -2045,42 +2183,81 @@ export class AppState {
   public showTray(): void {
     if (this.tray) return;
 
-    // Try to find a template image first for macOS
     const resourcesPath = app.isPackaged ? process.resourcesPath : app.getAppPath();
+    const fs = require('fs');
 
-    // Potential paths for tray icon
-    const templatePath = path.join(resourcesPath, 'assets', 'iconTemplate.png');
-    const defaultIconPath = app.isPackaged
-      ? path.join(resourcesPath, 'src/components/icon.png')
-      : path.join(app.getAppPath(), 'src/components/icon.png');
+    // Platform-specific icon resolution. v2.4.8 fix:
+    //   - Windows: prefer the sensi-branded multi-resolution .ico file.
+    //   - macOS:   prefer iconTemplate.png (monochrome template the OS
+    //              tints to match the menu-bar theme). Falls back to the
+    //              full-color icon if no template is bundled.
+    //   - Linux:   use the highest-fidelity PNG we have.
+    // The prior code blindly preferred iconTemplate.png which was:
+    //   (a) the upstream Natively "N" silhouette, not sensi's mark, and
+    //   (b) a template image on Windows, where templates are not supported
+    //       — which is why the tray icon often failed to render at all.
+    const candidates: string[] = [];
+    if (process.platform === 'win32') {
+      candidates.push(
+        path.join(resourcesPath, 'assets', 'icons', 'win', 'icon.ico'),
+        path.join(resourcesPath, 'assets', 'icons', 'png', 'icon_32x32.png'),
+        path.join(resourcesPath, 'assets', 'icon.png'),
+      );
+    } else if (process.platform === 'darwin') {
+      candidates.push(
+        path.join(resourcesPath, 'assets', 'iconTemplate.png'),
+        path.join(app.getAppPath(), 'src/components/iconTemplate.png'),
+        path.join(resourcesPath, 'assets', 'icon.png'),
+      );
+    } else {
+      candidates.push(
+        path.join(resourcesPath, 'assets', 'icons', 'png', 'icon_32x32.png'),
+        path.join(resourcesPath, 'assets', 'icon.png'),
+      );
+    }
+    // Always keep the bundled src/components/icon.png as a last-resort
+    // fallback — in dev it lives inside the project tree rather than
+    // resourcesPath, and existed before the asset regeneration pass.
+    candidates.push(
+      app.isPackaged
+        ? path.join(resourcesPath, 'src/components/icon.png')
+        : path.join(app.getAppPath(), 'src/components/icon.png')
+    );
 
-    let iconToUse = defaultIconPath;
-
-    // Check if template exists (sync check is fine for startup/rare toggle)
-    try {
-      if (require('fs').existsSync(templatePath)) {
-        iconToUse = templatePath;
-        console.log('[Tray] Using template icon:', templatePath);
-      } else {
-        // Also check src/components for dev
-        const devTemplatePath = path.join(app.getAppPath(), 'src/components/iconTemplate.png');
-        if (require('fs').existsSync(devTemplatePath)) {
-          iconToUse = devTemplatePath;
-          console.log('[Tray] Using dev template icon:', devTemplatePath);
-        } else {
-          console.log('[Tray] Template icon not found, using default:', defaultIconPath);
+    let iconToUse: string | null = null;
+    for (const candidate of candidates) {
+      try {
+        if (fs.existsSync(candidate)) {
+          iconToUse = candidate;
+          break;
         }
+      } catch {
+        // next candidate
       }
-    } catch (e) {
-      console.error('[Tray] Error checking for icon:', e);
     }
 
-    const trayIcon = nativeImage.createFromPath(iconToUse).resize({ width: 16, height: 16 });
-    // IMPORTANT: specific template settings for macOS if needed, but 'Template' in name usually suffices
+    if (!iconToUse) {
+      console.error('[Tray] No tray icon found. Tried:', candidates);
+      return;
+    }
+    console.log('[Tray] Using tray icon:', iconToUse);
+
+    // On Windows, load the .ico directly without resize — Windows picks the
+    // right resolution from the multi-res image at runtime. Resizing a .ico
+    // with nativeImage.resize() can produce a blurred 16×16 that ignores the
+    // embedded ladder. PNGs still get resized.
+    let trayIcon = nativeImage.createFromPath(iconToUse);
+    if (trayIcon.isEmpty()) {
+      console.error('[Tray] nativeImage loaded empty from:', iconToUse);
+      return;
+    }
+    if (!iconToUse.endsWith('.ico')) {
+      trayIcon = trayIcon.resize({ width: 16, height: 16 });
+    }
     trayIcon.setTemplateImage(iconToUse.endsWith('Template.png'));
 
-    this.tray = new Tray(trayIcon)
-    this.tray.setToolTip('Natively') // This tooltip might also need update if we change global shortcut, but global shortcut is removed.
+    this.tray = new Tray(trayIcon);
+    this.tray.setToolTip('sensi');
     this.updateTrayMenu();
 
     // Double-click to show window
@@ -2098,7 +2275,7 @@ export class AppState {
     console.log('[Main] updateTrayMenu called. Screenshot Accelerator:', screenshotAccel);
 
     // Update tooltip for verification
-    this.tray.setToolTip('Natively');
+    this.tray.setToolTip('sensi');
 
     // Helper to format accelerator for display (e.g. CommandOrControl+H -> Cmd+H)
     const formatAccel = (accel: string) => {
@@ -2116,9 +2293,14 @@ export class AppState {
     const toggleAccel = toggleKb || 'CommandOrControl+B';
     const displayToggle = formatAccel(toggleAccel);
 
+    const passthroughKb = keybindManager.getKeybind('general:toggle-mouse-passthrough');
+    const passthroughAccel = passthroughKb || 'CommandOrControl+Shift+B';
+    const displayPassthrough = formatAccel(passthroughAccel);
+    const isPassthroughOn = this.getOverlayMousePassthrough();
+
     const contextMenu = Menu.buildFromTemplate([
       {
-        label: 'Show Natively',
+        label: 'Show sensi',
         click: () => {
           this.centerAndShowWindow()
         }
@@ -2127,6 +2309,18 @@ export class AppState {
         label: `Toggle Window (${displayToggle})`,
         click: () => {
           this.toggleMainWindow()
+        }
+      },
+      {
+        type: 'separator'
+      },
+      {
+        // Shows current state so the user can always tell from the tray whether
+        // the overlay is currently click-through, and always has a one-click
+        // escape if they forgot Ctrl+Shift+B.
+        label: `${isPassthroughOn ? '✓ ' : ''}Click-through mode (${displayPassthrough})`,
+        click: () => {
+          this.toggleOverlayMousePassthrough()
         }
       },
       {
@@ -2305,6 +2499,11 @@ export class AppState {
     KeybindManager.getInstance().revalidateShortcuts();
 
     this._broadcastToAllWindows('overlay-mouse-passthrough-changed', state);
+
+    // Refresh the tray menu so the "Click-through mode" item's ✓ reflects
+    // the new state — the tray is the user's last-resort escape hatch when
+    // the overlay is click-through.
+    try { this.updateTrayMenu(); } catch (e) { /* tray may not exist yet */ }
   }
 
   public toggleOverlayMousePassthrough(): boolean {
@@ -2345,7 +2544,7 @@ export class AppState {
   }
 
   private _applyDisguise(mode: 'terminal' | 'settings' | 'activity' | 'none'): void {
-    let appName = "Natively";
+    let appName = "sensi";
     let iconPath = "";
 
     const isWin = process.platform === 'win32';
@@ -2389,11 +2588,11 @@ export class AppState {
         }
         break;
       case 'none':
-        appName = "Natively";
+        appName = "sensi";
         if (isMac) {
           iconPath = app.isPackaged
-            ? path.join(process.resourcesPath, "natively.icns")
-            : path.join(app.getAppPath(), "assets/natively.icns");
+            ? path.join(process.resourcesPath, "assets/icon.icns")
+            : path.join(app.getAppPath(), "assets/icon.icns");
         } else if (isWin) {
           iconPath = app.isPackaged
             ? path.join(process.resourcesPath, "assets/icons/win/icon.ico")
@@ -2425,7 +2624,7 @@ export class AppState {
     // 3. Update App User Model ID (Windows Taskbar grouping)
     if (isWin) {
       // Use unique AUMID per disguise to avoid grouping with the real app
-      app.setAppUserModelId(`com.natively.assistant.${mode}`);
+      app.setAppUserModelId(`com.tobyjoe.sensi.${mode}`);
     }
 
     // 4. Update Icons
@@ -2518,12 +2717,78 @@ async function initializeApp() {
   // 1. Enforce single instance — prevent duplicate dock icons from leftover processes.
   // In development mode with hot-reload this is still safe because electron is restarted
   // by the build step, not re-launched by concurrently while the old process is alive.
+  //
+  // PACKAGING-01 fix (2026-04-17): when the user launches sensi again after
+  // hiding the window via Ctrl+B (or any other path that makes the window
+  // invisible), the second instance must RAISE the first instance's window
+  // rather than silently quit. Without this, "I thought the app crashed so I
+  // relaunched it" becomes a dead-end — the new instance dies on the lock,
+  // the old one stays hidden, and the user sees nothing.
   const gotLock = app.requestSingleInstanceLock();
   if (!gotLock) {
     console.log('[Main] Another instance is already running. Quitting this instance.');
     app.quit();
     return;
   }
+  // sensi M8 / PASS B: register as the default handler for `sensi://`
+  // custom protocol URLs. When the user completes sign-in on
+  // api.sensi.cloudfrontiers.co.uk/auth/google, the backend redirects
+  // to `sensi://auth/callback?access=...&refresh=...` — the OS then
+  // launches (or focuses) sensi with that URL. On Windows the URL
+  // arrives as an argv entry to a second-instance launch; on macOS it
+  // arrives via the `open-url` event below.
+  try {
+    if (process.defaultApp) {
+      if (process.argv.length >= 2) {
+        app.setAsDefaultProtocolClient('sensi', process.execPath, [
+          require('path').resolve(process.argv[1]),
+        ]);
+      }
+    } else {
+      app.setAsDefaultProtocolClient('sensi');
+    }
+  } catch (err) {
+    console.warn('[Main] Failed to register sensi:// protocol handler:', err);
+  }
+  app.on('second-instance', (_event, argv) => {
+    console.log('[Main] Second-instance launch detected — bringing existing window to front.');
+    try {
+      const existingAppState = AppState.getInstance();
+      if (typeof (existingAppState as any).centerAndShowWindow === 'function') {
+        (existingAppState as any).centerAndShowWindow();
+      } else {
+        const wins = BrowserWindow.getAllWindows();
+        for (const w of wins) {
+          if (w.isMinimized()) w.restore();
+          w.show();
+          w.focus();
+        }
+      }
+      // sensi M8 / PASS B: pull any sensi:// URL out of the argv payload
+      // Windows appends to the second-instance invocation. (Linux too.)
+      const sensiUrl = argv.find((a) => typeof a === 'string' && a.startsWith('sensi://'));
+      if (sensiUrl) {
+        console.log('[Main] Protocol URL received via second-instance:', redactCallback(sensiUrl));
+        const { AuthManager } = require('./services/AuthManager') as typeof import('./services/AuthManager');
+        void AuthManager.getInstance().handleCallback(sensiUrl);
+      }
+    } catch (err) {
+      console.error('[Main] second-instance handler failed:', err);
+    }
+  });
+  // macOS: protocol URLs arrive via open-url, not argv.
+  app.on('open-url', (event, url) => {
+    if (typeof url === 'string' && url.startsWith('sensi://')) {
+      event.preventDefault();
+      console.log('[Main] Protocol URL received via open-url:', redactCallback(url));
+      try {
+        const { AuthManager } = require('./services/AuthManager') as typeof import('./services/AuthManager');
+        void AuthManager.getInstance().handleCallback(url);
+      } catch (err) {
+        console.error('[Main] open-url handler failed:', err);
+      }
+    }
+  });
 
   // 2. Wait for app to be ready
   await app.whenReady()
@@ -2546,6 +2811,35 @@ async function initializeApp() {
   const { CredentialsManager } = require('./services/CredentialsManager');
   CredentialsManager.getInstance().init();
 
+  // sensi M8 / PASS B: AuthManager singleton. `init()` starts the /me
+  // poll loop if tokens are already present from a previous session.
+  // Must come AFTER CredentialsManager.init() (reads the persisted
+  // refresh token) and BEFORE any renderer window is created (so
+  // broadcasts go to a ready webContents).
+  try {
+    const { AuthManager } = require('./services/AuthManager') as typeof import('./services/AuthManager');
+    AuthManager.getInstance().init();
+    // Cold-start: if the app was launched by clicking a sensi:// link and
+    // this is the FIRST instance (no second-instance event will fire),
+    // pull the URL out of our own argv.
+    const coldStartUrl = process.argv.find((a) => typeof a === 'string' && a.startsWith('sensi://'));
+    if (coldStartUrl) {
+      console.log('[Main] Protocol URL on cold start:', redactCallback(coldStartUrl));
+      void AuthManager.getInstance().handleCallback(coldStartUrl);
+    }
+  } catch (err) {
+    console.error('[Main] Failed to initialize AuthManager:', err);
+  }
+
+  // MEMORY-01: drain any meetings queued during a previous session that
+  // couldn't reach sensi-cloud (offline, server restart, etc).
+  try {
+    const { MemoryIngestClient } = require('./services/MemoryIngestClient') as typeof import('./services/MemoryIngestClient');
+    MemoryIngestClient.getInstance().bootstrap();
+  } catch (err) {
+    console.warn('[Main] MemoryIngestClient bootstrap skipped:', err);
+  }
+
   // 4. Initialize State
   const appState = AppState.getInstance()
 
@@ -2563,11 +2857,6 @@ async function initializeApp() {
 
   // NOTE: CredentialsManager.init() and loadStoredCredentials() are already called
   // above before this block — do NOT call them again here to avoid double key-load.
-
-  // Anonymous install ping - one-time, non-blocking
-  // See electron/services/InstallPingManager.ts for privacy details
-  const { sendAnonymousInstallPing } = require('./services/InstallPingManager');
-  sendAnonymousInstallPing();
 
   // Load stored Google Service Account path (for Speech-to-Text)
   // Fall back to GOOGLE_APPLICATION_CREDENTIALS env var (set in terminal but not Spotlight)
@@ -2588,12 +2877,15 @@ async function initializeApp() {
 
   // Apply initial stealth state based on isUndetectable setting.
   // NOTE: app.dock.hide() was already called pre-emptively before createWindow()
-  // when isUndetectable=true. Here we only need to initialize the tray for non-stealth mode.
-  if (!appState.getUndetectable()) {
-    // Normal mode: show tray (dock is already showing — no need to call dock.show() again)
+  // when isUndetectable=true. Tray visibility:
+  //   - macOS: tied to dock — hide in stealth so the app is invisible to the OS.
+  //   - Windows/Linux: the tray icon is only visible to the user themselves,
+  //     not to anyone they're screen-sharing with, so hiding it doesn't
+  //     improve privacy — it only makes sensi inaccessible. Always show.
+  const shouldShowTray = process.platform !== 'darwin' || !appState.getUndetectable();
+  if (shouldShowTray) {
     appState.showTray();
   }
-  // Stealth mode: dock is already hidden, tray stays hidden, no action needed here.
   // Register global shortcuts using KeybindManager
   KeybindManager.getInstance().registerGlobalShortcuts()
 
@@ -2653,7 +2945,7 @@ async function initializeApp() {
             if (!win.isDestroyed()) {
               win.webContents.send(
                 'system-audio-permission-denied',
-                'Screen Recording is disabled. System audio capture will not work. Click "Open Settings" to enable it, then restart Natively.'
+                'Screen Recording is disabled. System audio capture will not work. Click "Open Settings" to enable it, then restart sensi.'
               );
             }
           });
@@ -2673,6 +2965,54 @@ async function initializeApp() {
     const calMgr = CalendarManager.getInstance();
     calMgr.init();
 
+    // sensi M8 / PASS B: forward CalendarManager's internal connection
+    // events to every renderer so the Calendar settings panel reflects
+    // real-time changes (e.g. after sensi sign-in auto-connects Google).
+    calMgr.on('connection-changed', (_connected: boolean) => {
+      try {
+        const status = calMgr.getConnectionStatus();
+        for (const win of BrowserWindow.getAllWindows()) {
+          if (!win.isDestroyed()) {
+            win.webContents.send('calendar-connection-changed', status);
+          }
+        }
+      } catch (err) {
+        console.warn('[Main] calendar-connection-changed broadcast failed:', (err as Error)?.message);
+      }
+    });
+
+    // sensi M8 / PASS B: when sensi-cloud sign-in completes, adopt the
+    // bundled Google OAuth tokens so Calendar is instantly connected —
+    // no second OAuth consent required.
+    try {
+      const { AuthManager } = require('./services/AuthManager') as typeof import('./services/AuthManager');
+      AuthManager.getInstance().on('signed-in', (evt: { hasGoogleTokens: boolean }) => {
+        if (!evt?.hasGoogleTokens) return;
+        const creds = CredentialsManager.getInstance();
+        const accessToken = creds.getGoogleAccessToken();
+        const accessExpiresAt = creds.getGoogleAccessExpiresAt();
+        const refreshToken = creds.getGoogleRefreshToken();
+        if (!accessToken || !accessExpiresAt) return;
+        try {
+          calMgr.adoptGoogleOAuthTokens({
+            accessToken,
+            accessExpiresAt,
+            refreshToken,
+          });
+          console.log('[Main] Calendar auto-connected via sensi sign-in');
+        } catch (e) {
+          console.warn('[Main] adoptGoogleOAuthTokens failed:', (e as Error)?.message);
+        }
+      });
+      // Clear Calendar state on sign-out so the user isn't left with a
+      // connected-looking calendar that can't refresh its token.
+      AuthManager.getInstance().on('signed-out', () => {
+        void calMgr.disconnect();
+      });
+    } catch (e) {
+      console.warn('[Main] Could not wire AuthManager → CalendarManager bridge:', (e as Error)?.message);
+    }
+
     calMgr.on('start-meeting-requested', (event: any) => {
       console.log('[Main] Start meeting requested from calendar notification', event);
       appState.centerAndShowWindow();
@@ -2686,6 +3026,126 @@ async function initializeApp() {
     calMgr.on('open-requested', () => {
       appState.centerAndShowWindow();
     });
+
+    // Pre-meeting alert: raise the window + push a rich in-app prompt to the
+    // renderer so the user gets an active "Bring sensi?" decision UI alongside
+    // the native OS notification. Respects the preMeetingAlertsEnabled setting.
+    calMgr.on('event-imminent', (event: any) => {
+      const alertsEnabled = SettingsManager.getInstance().get('preMeetingAlertsEnabled') ?? true;
+      if (!alertsEnabled) {
+        console.log('[Main] event-imminent received but pre-meeting alerts are disabled');
+        return;
+      }
+      console.log('[Main] event-imminent — surfacing pre-meeting prompt:', event?.title);
+      // Surface the launcher so the modal is visible. If the user is deep in
+      // another app we still broadcast; the renderer stores the alert and
+      // shows it the moment the window is next focused.
+      try { appState.centerAndShowWindow(); } catch (e) { /* best effort */ }
+      appState.broadcast('pre-meeting-alert', event);
+    });
+
+    // v2.5.1 — Meeting detection (actual running app, not calendar). When
+    // a Zoom/Teams/Meet/etc. process enters, reuse the same in-app prompt
+    // modal that the calendar-based alert uses. Distinguishable by the
+    // synthetic event id (prefix `detected:`).
+    try {
+      const { MeetingDetector } = require('./services/MeetingDetector') as typeof import('./services/MeetingDetector');
+      const detector = MeetingDetector.getInstance();
+      const detectEnabled = SettingsManager.getInstance().get('meetingAutoDetectEnabled') ?? true;
+      detector.setEnabled(detectEnabled);
+      if (detectEnabled) detector.start();
+
+      detector.on('meeting-started', (detection: import('./services/MeetingDetector').DetectedMeeting) => {
+        if (appState.getIsMeetingActive()) {
+          // Already recording — no need to prompt
+          console.log('[Main] meeting-started ignored: sensi meeting already active');
+          return;
+        }
+        console.log(`[Main] meeting-started: ${detection.appLabel}`);
+        try { appState.centerAndShowWindow(); } catch (e) { /* best effort */ }
+        const syntheticEvent = {
+          id: `detected:${detection.app}:${detection.detectedAt}`,
+          title: `${detection.appLabel} meeting`,
+          startTime: new Date(detection.detectedAt).toISOString(),
+          endTime: new Date(detection.detectedAt + 60 * 60 * 1000).toISOString(),
+        };
+        appState.broadcast('pre-meeting-alert', syntheticEvent);
+      });
+      console.log('[Main] MeetingDetector initialized (enabled =', detectEnabled, ')');
+    } catch (err) {
+      console.error('[Main] Failed to initialize MeetingDetector:', err);
+    }
+
+    // M6-A v2.6.0: Live Coding mode — wire the screenshot fn + load the
+    // persisted enabled flag. Actual timer only runs while a meeting is
+    // active AND the flag is on, so binding here is cheap.
+    try {
+      const { LiveScreenCapture } = require('./services/LiveScreenCapture') as typeof import('./services/LiveScreenCapture');
+      const lsc = LiveScreenCapture.getInstance();
+      lsc.bindCaptureFn(() => appState.getScreenshotHelper().takeLiveFrame());
+      const liveEnabled = SettingsManager.getInstance().get('liveCodingModeEnabled') ?? false;
+      lsc.setEnabled(liveEnabled);
+      // Broadcast running state to renderer so the overlay can show a LIVE chip.
+      lsc.on('running', (running: boolean) => {
+        appState.broadcast('live-screen-capture-running', running);
+      });
+      console.log('[Main] LiveScreenCapture initialized (enabled =', liveEnabled, ')');
+    } catch (err) {
+      console.error('[Main] Failed to initialize LiveScreenCapture:', err);
+    }
+
+    // sensi M7 / MOTION-01 (v2.8.0): Motion Capture Manager — user-driven
+    // video/GIF frame capture for assessment summarization and clip
+    // comparison. Same screenshot path as Live Coding; separate frame list.
+    try {
+      const { MotionCaptureManager } = require('./services/MotionCaptureManager') as typeof import('./services/MotionCaptureManager');
+      const mcm = MotionCaptureManager.getInstance();
+      mcm.bindCaptureFn(() => appState.getScreenshotHelper().takeLiveFrame());
+      mcm.on('captured', (payload: { index: number }) => {
+        appState.broadcast('motion-frame-captured', { frameCount: payload.index + 1 });
+      });
+      mcm.on('auto-stopped', () => {
+        appState.broadcast('motion-auto-stopped', {});
+      });
+      console.log('[Main] MotionCaptureManager initialized');
+    } catch (err) {
+      console.error('[Main] Failed to initialize MotionCaptureManager:', err);
+    }
+
+    // sensi M7 / PERSONA-01 (v2.10.0): PersonaManager — owns user_persona
+    // table and extraction pipeline. Binds to the live DB handle + a
+    // function that resolves the active LLMHelper so the persona's
+    // resume-extract call routes through whichever provider the user
+    // has configured.
+    try {
+      const { PersonaManager } = require('./persona/PersonaManager') as typeof import('./persona/PersonaManager');
+      const db = DatabaseManager.getInstance().getDb();
+      if (db) {
+        PersonaManager.getInstance().bind({
+          db: db as any,
+          llmHelperProvider: () => appState.processingHelper?.getLLMHelper?.() ?? null,
+        });
+        console.log('[Main] PersonaManager initialized');
+      } else {
+        console.warn('[Main] PersonaManager: DatabaseManager has no live handle yet');
+      }
+    } catch (err) {
+      console.error('[Main] Failed to initialize PersonaManager:', err);
+    }
+
+    // sensi M7 / PREP-01 (v2.12.0): PrepOrchestrator — composes a
+    // pre-meeting briefing from persona + JD + attached docs + Tavily
+    // research. Briefs are cached 24h per eventId; company research
+    // is cached 7d per company name.
+    try {
+      const { PrepOrchestrator } = require('./services/PrepOrchestrator') as typeof import('./services/PrepOrchestrator');
+      PrepOrchestrator.getInstance().bind({
+        llmHelperProvider: () => appState.processingHelper?.getLLMHelper?.() ?? null,
+      });
+      console.log('[Main] PrepOrchestrator initialized');
+    } catch (err) {
+      console.error('[Main] Failed to initialize PrepOrchestrator:', err);
+    }
 
     console.log('[Main] CalendarManager initialized');
   } catch (e) {

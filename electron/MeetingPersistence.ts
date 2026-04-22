@@ -6,6 +6,7 @@ import { SessionTracker, TranscriptSegment } from './SessionTracker';
 import { LLMHelper } from './LLMHelper';
 import { DatabaseManager, Meeting } from './db/DatabaseManager';
 import { GROQ_TITLE_PROMPT, GROQ_SUMMARY_JSON_PROMPT } from './llm';
+import { MemoryIngestClient } from './services/MemoryIngestClient';
 const crypto = require('crypto');
 
 export class MeetingPersistence {
@@ -178,6 +179,27 @@ export class MeetingPersistence {
             DatabaseManager.getInstance().saveMeeting(meetingData, data.startTime, data.durationMs);
 
             // Metadata was already snapshotted before session.reset() — nothing to clear here.
+
+            // MEMORY-01: fire-and-forget push to the cross-meeting memory engine.
+            // No-ops when signed out or the memory toggle is off.
+            try {
+                MemoryIngestClient.getInstance().enqueue({
+                    meeting_id: meetingData.id,
+                    title: meetingData.title,
+                    summary: meetingData.detailedSummary
+                        ? JSON.stringify(meetingData.detailedSummary)
+                        : meetingData.summary,
+                    transcript_segments: (meetingData.transcript ?? []).map((s: TranscriptSegment) => ({
+                        speaker: s.speaker,
+                        content: s.text,
+                        timestamp_ms: s.timestamp ?? 0,
+                    })),
+                    started_at_ms: data.startTime,
+                    source: (source === 'calendar' ? 'calendar' : 'manual'),
+                });
+            } catch (e) {
+                console.warn('[MeetingPersistence] MemoryIngestClient enqueue failed:', e);
+            }
 
             // Notify Frontend to refresh list
             const wins = require('electron').BrowserWindow.getAllWindows();

@@ -1,3 +1,7 @@
+// sensi M1 Step 4 — typed provider status shared with the main process.
+// Imported via the @providers Vite alias (see vite.config.mts + tsconfig paths).
+import type { ProviderId, ProviderStatus } from '@providers/types'
+
 export interface ElectronAPI {
   updateContentDimensions: (dimensions: {
     width: number
@@ -74,7 +78,7 @@ export interface ElectronAPI {
   getAvailableOllamaModels: () => Promise<string[]>
   switchToOllama: (model?: string, url?: string) => Promise<{ success: boolean; error?: string }>
   switchToGemini: (apiKey?: string, modelId?: string) => Promise<{ success: boolean; error?: string }>
-  testLlmConnection: (provider: 'gemini' | 'groq' | 'openai' | 'claude', apiKey?: string) => Promise<{ success: boolean; error?: string }>
+  testLlmConnection: (provider: 'gemini' | 'groq' | 'openai' | 'claude' | 'minimax', apiKey?: string) => Promise<{ success: boolean; error?: string }>
   selectServiceAccount: () => Promise<{ success: boolean; path?: string; cancelled?: boolean; error?: string }>
 
   // API Key Management
@@ -83,8 +87,17 @@ export interface ElectronAPI {
   setOpenaiApiKey: (apiKey: string) => Promise<{ success: boolean; error?: string }>
   setClaudeApiKey: (apiKey: string) => Promise<{ success: boolean; error?: string }>
   setNativelyApiKey: (apiKey: string) => Promise<{ success: boolean; error?: string }>
+  // sensi M1 Step 3: MiniMax credential setter, mirrors setGeminiApiKey shape
+  setMinimaxApiKey: (apiKey: string) => Promise<{ success: boolean; error?: string }>
+
+  // sensi M1 Step 4 — typed multi-provider key vault surface.
+  // Never bare booleans — see DECISIONS.md D007.
+  getConfiguredProviders: () => Promise<ProviderStatus[]>
+  setActiveProviderAndModel: (provider: ProviderId, model: string) => Promise<ProviderStatus>
+  getActiveProviderAndModel: () => Promise<{ provider: ProviderId | null; model: string | null }>
+  onLlmActiveChanged: (callback: (payload: { provider: ProviderId; model: string }) => void) => () => void
   getNativelyUsage: () => Promise<{ ok: boolean; error?: string; plan?: string; quota?: { transcription: { used: number; limit: number; remaining: number }; ai: { used: number; limit: number; remaining: number }; search: { used: number; limit: number; remaining: number }; resets_at: string }; member_since?: string }>
-  getStoredCredentials: () => Promise<{ hasNativelyKey?: boolean; hasGeminiKey: boolean; hasGroqKey: boolean; hasOpenaiKey: boolean; hasClaudeKey: boolean; googleServiceAccountPath: string | null; sttProvider: 'none' | 'google' | 'groq' | 'openai' | 'deepgram' | 'elevenlabs' | 'azure' | 'ibmwatson' | 'soniox' | 'natively'; hasSttGroqKey: boolean; hasSttOpenaiKey: boolean; hasDeepgramKey: boolean; hasElevenLabsKey: boolean; hasAzureKey: boolean; azureRegion: string; hasIbmWatsonKey: boolean; ibmWatsonRegion: string; groqSttModel?: string; hasSonioxKey?: boolean; hasTavilyKey?: boolean; geminiPreferredModel?: string; groqPreferredModel?: string; openaiPreferredModel?: string; claudePreferredModel?: string; sttGroqKey?: string; sttOpenaiKey?: string; sttDeepgramKey?: string; sttElevenLabsKey?: string; sttAzureKey?: string; sttIbmKey?: string; sttSonioxKey?: string }>
+  getStoredCredentials: () => Promise<{ hasNativelyKey?: boolean; hasMinimaxKey?: boolean; hasGeminiKey: boolean; hasGroqKey: boolean; hasOpenaiKey: boolean; hasClaudeKey: boolean; googleServiceAccountPath: string | null; sttProvider: 'none' | 'google' | 'groq' | 'openai' | 'deepgram' | 'elevenlabs' | 'azure' | 'ibmwatson' | 'soniox' | 'natively'; hasSttGroqKey: boolean; hasSttOpenaiKey: boolean; hasDeepgramKey: boolean; hasElevenLabsKey: boolean; hasAzureKey: boolean; azureRegion: string; hasIbmWatsonKey: boolean; ibmWatsonRegion: string; groqSttModel?: string; hasSonioxKey?: boolean; hasTavilyKey?: boolean; minimaxPreferredModel?: string; geminiPreferredModel?: string; groqPreferredModel?: string; openaiPreferredModel?: string; claudePreferredModel?: string; sttGroqKey?: string; sttOpenaiKey?: string; sttDeepgramKey?: string; sttElevenLabsKey?: string; sttAzureKey?: string; sttIbmKey?: string; sttSonioxKey?: string }>
   // Permissions
   checkPermissions:     () => Promise<{ microphone: 'granted'|'denied'|'not-determined'|'restricted'; screen: 'granted'|'denied'|'not-determined'|'restricted'; platform: string }>
   requestMicPermission: () => Promise<boolean>
@@ -92,7 +105,7 @@ export interface ElectronAPI {
   // Free Trial
   startTrial:     () => Promise<{ ok: boolean; trial_token?: string; started_at?: string; expires_at?: string; expired?: boolean; already_used?: boolean; converted_to?: string | null; usage?: { ai: number; stt_seconds: number; search: number }; limits?: { duration_ms: number; ai_requests: number; stt_minutes: number; search_requests: number }; error?: string; status?: number }>
   getTrialStatus: () => Promise<{ ok: boolean; expired?: boolean; remaining_ms?: number; started_at?: string; expires_at?: string; converted_to?: string | null; usage?: { ai: number; stt_seconds: number; search: number }; limits?: object; error?: string }>
-  getLocalTrial:  () => Promise<{ hasToken: boolean; trialToken?: string; expiresAt?: string; startedAt?: string; expired?: boolean }>
+  getLocalTrial:  () => Promise<{ hasToken: boolean; expiresAt?: string; startedAt?: string; expired?: boolean }>
   convertTrial:   (choice: string) => Promise<{ ok: boolean }>
   endTrialByok:        () => Promise<{ success: boolean; error?: string }>
   wipeTrialProfileData: () => Promise<{ success: boolean; error?: string }>
@@ -185,6 +198,9 @@ export interface ElectronAPI {
   onIntelligenceError: (callback: (data: { error: string, mode: string }) => void) => () => void;
   // Session Management
   onSessionReset: (callback: () => void) => () => void;
+  // v2.15.0: cancel-on-speech notifier. Fires when the rolling stream
+  // is aborted because the interviewer resumed speaking mid-answer.
+  onRollingStreamCancelled: (callback: () => void) => () => void;
 
   // Streaming listeners
   streamGeminiChat: (message: string, imagePaths?: string[], context?: string, options?: { skipSystemPrompt?: boolean, ignoreKnowledgeMode?: boolean }) => Promise<void>
@@ -252,6 +268,26 @@ export interface ElectronAPI {
   getCalendarStatus: () => Promise<{ connected: boolean; email?: string }>
   getUpcomingEvents: () => Promise<Array<{ id: string; title: string; startTime: string; endTime: string; link?: string; source: 'google' }>>
   calendarRefresh: () => Promise<{ success: boolean; error?: string }>
+  getGoogleOauthStatus: () => Promise<{ configured: boolean; maskedClientId: string | null }>
+  setGoogleOauthCredentials: (payload: { clientId: string; clientSecret: string }) => Promise<{ success: boolean; error?: string }>
+  clearGoogleOauthCredentials: () => Promise<{ success: boolean; error?: string }>
+
+  // Pre-meeting alerts
+  onPreMeetingAlert: (callback: (event: { id: string; title: string; startTime: string; endTime: string; link?: string }) => void) => () => void
+  preMeetingAcceptAlert: (event: { id: string; title: string }) => Promise<{ success: boolean; error?: string }>
+  preMeetingDismissAlert: (event: { id: string }) => Promise<{ success: boolean; error?: string }>
+  getPreMeetingAlertsEnabled: () => Promise<boolean>
+  setPreMeetingAlertsEnabled: (enabled: boolean) => Promise<{ success: boolean; error?: string }>
+  getMeetingAutoDetectEnabled: () => Promise<boolean>
+  setMeetingAutoDetectEnabled: (enabled: boolean) => Promise<{ success: boolean; error?: string }>
+  // M6-A: Live Coding mode
+  getLiveCodingModeEnabled: () => Promise<boolean>
+  setLiveCodingModeEnabled: (enabled: boolean) => Promise<{ success: boolean; error?: string }>
+  getOnlineAssessmentModeEnabled: () => Promise<boolean>
+  setOnlineAssessmentModeEnabled: (enabled: boolean) => Promise<{ success: boolean; error?: string }>
+  onOnlineAssessmentModeChanged: (callback: (enabled: boolean) => void) => () => void
+  getLiveScreenCaptureRunning: () => Promise<boolean>
+  onLiveScreenCaptureRunning: (callback: (running: boolean) => void) => () => void
 
   // Auto-Update
   onUpdateAvailable: (callback: (info: any) => void) => () => void
@@ -309,9 +345,54 @@ export interface ElectronAPI {
   // Tavily Search API
   setTavilyApiKey: (apiKey: string) => Promise<{ success: boolean; error?: string }>
 
+  // sensi M8 / PASS B (v2.13.0): sensi-cloud auth
+  authSignIn: () => Promise<{ success: true } | { success: false; error: string }>
+  authSignOut: () => Promise<{ success: true } | { success: false; error: string }>
+  authGetState: () => Promise<
+    | { success: true; state: SensiAuthStateIpc }
+    | { success: false; error: string }
+  >
+  authRefreshMe: () => Promise<
+    | { success: true; me: SensiMeIpc | null }
+    | { success: false; error: string }
+  >
+  authOpenCheckout: () => Promise<{ success: true } | { success: false; error: string }>
+  authOpenPortal: () => Promise<{ success: true } | { success: false; error: string }>
+
+  // MEMORY-01 (v2.17.0) — cross-meeting memory engine
+  memoryGetEnabled: () => Promise<{ enabled: boolean }>
+  memorySetEnabled: (enabled: boolean) => Promise<{ success: boolean }>
+  memoryGetQueueSize: () => Promise<{ pending: number }>
+  memoryPurge: () => Promise<{ success: boolean; deleted?: number; error?: string }>
+
+  onAuthStateChanged: (callback: (state: SensiAuthStateIpc) => void) => () => void
+  onCalendarConnectionChanged: (
+    callback: (status: { connected: boolean; email?: string }) => void,
+  ) => () => void
+
+  // sensi M7 / RESEARCH-01: Standalone research
+  researchRun: (query: string, scope?: 'company' | 'general') => Promise<{
+    success: boolean
+    brief?: string
+    query?: string
+    scope?: 'company' | 'general'
+    sources?: Array<{ title: string; url: string }>
+    error?: string
+  }>
+
+  // sensi M7 / MOTION-01: Video / GIF frame capture + analysis
+  motionStart: () => Promise<{ ok: boolean; maxFrames?: number; intervalMs?: number; error?: string }>
+  motionStop: () => Promise<{ ok: boolean; frames?: string[]; durationMs?: number; error?: string }>
+  motionStatus: () => Promise<{ recording: boolean; frameCount: number; elapsedMs: number; maxFrames: number; intervalMs: number }>
+  motionSummarize: (framePaths: string[]) => Promise<{ success: boolean; brief?: string; frameCount?: number; error?: string }>
+  motionCompare: (clipA: string[], clipB: string[]) => Promise<{ success: boolean; brief?: string; clipAFrames?: number; clipBFrames?: number; error?: string }>
+  motionDiscard: (framePaths: string[]) => Promise<{ success: boolean; error?: string }>
+  onMotionFrameCaptured: (callback: (data: { frameCount: number }) => void) => () => void
+  onMotionAutoStopped: (callback: () => void) => () => void
+
   // Dynamic Model Discovery
-  fetchProviderModels: (provider: 'gemini' | 'groq' | 'openai' | 'claude', apiKey: string) => Promise<{ success: boolean; models?: {id: string, label: string}[]; error?: string }>
-  setProviderPreferredModel: (provider: 'gemini' | 'groq' | 'openai' | 'claude', modelId: string) => Promise<void>
+  fetchProviderModels: (provider: 'gemini' | 'groq' | 'openai' | 'claude' | 'minimax', apiKey: string) => Promise<{ success: boolean; models?: {id: string, label: string}[]; error?: string }>
+  setProviderPreferredModel: (provider: 'gemini' | 'groq' | 'openai' | 'claude' | 'minimax', modelId: string) => Promise<void>
 
   // License Management
   licenseActivate: (key: string) => Promise<{ success: boolean; error?: string }>
@@ -343,6 +424,328 @@ export interface ElectronAPI {
 
   // Platform
   platform: NodeJS.Platform;
+
+  // sensi M4-T8 — Knowledge base IPC surface.
+  // All eight channels use the `{ success: true, ...data } |
+  // { success: false, error: string, errorType: KnowledgeIpcErrorType }`
+  // discriminated-union result shape (matches existing codebase
+  // convention for ipcHandlers). Renderer patterns:
+  //   const r = await window.electronAPI.knowledgeListDocuments();
+  //   if (r.success) { r.documents.forEach(...) }
+  //   else { showError(r.error, r.errorType) }
+  knowledgeIngestDocument: (filePath: string) => Promise<
+    | {
+        success: true;
+        documentId: string;
+        chunkCount: number;
+        embeddingModel: string;
+        embeddingProvider: 'ollama' | 'gemini';
+      }
+    | KnowledgeIpcFailure
+  >;
+  knowledgeListDocuments: () => Promise<
+    | { success: true; documents: KnowledgeDocumentMetadata[] }
+    | KnowledgeIpcFailure
+  >;
+  knowledgeDeleteDocument: (id: string) => Promise<
+    { success: true } | KnowledgeIpcFailure
+  >;
+  knowledgePinDocument: (id: string) => Promise<
+    { success: true; pinnedAt: string | null } | KnowledgeIpcFailure
+  >;
+  knowledgeUnpinDocument: (id: string) => Promise<
+    { success: true; pinnedAt: string | null } | KnowledgeIpcFailure
+  >;
+  knowledgeListPinned: () => Promise<
+    | { success: true; documents: KnowledgeDocumentMetadata[] }
+    | KnowledgeIpcFailure
+  >;
+  knowledgeQuery: (payload: {
+    query: string;
+    topK: number;
+    includePinned?: boolean;
+    documentIds?: string[];
+  }) => Promise<
+    | { success: true; hits: KnowledgeRetrievedChunk[] }
+    | KnowledgeIpcFailure
+  >;
+  knowledgeGetDocumentPreview: (
+    id: string,
+    maxChars?: number
+  ) => Promise<
+    | { success: true; id: string; text: string; truncated: boolean }
+    | KnowledgeIpcFailure
+  >;
+
+  // sensi M4-T10 — Knowledge base export/import
+  //
+  // Four channels: two operations (export/import) and two dialog
+  // helpers (pick-export-path / pick-import-path). The renderer
+  // owns the two-step flow: pick a path, then invoke the operation.
+  // Main-process dialog wrappers keep dialog state out of renderer
+  // and match the existing file-picker IPC pattern.
+  knowledgeExport: (filePath: string) => Promise<
+    | {
+        success: true;
+        filePath: string;
+        documentCount: number;
+        chunkCount: number;
+      }
+    | KnowledgeIpcFailure
+  >;
+  knowledgeImport: (filePath: string) => Promise<
+    | {
+        success: true;
+        filePath: string;
+        replaced: number;
+        imported: number;
+        chunkCount: number;
+        backupPath: string | null;
+      }
+    | KnowledgeIpcFailure
+  >;
+  knowledgePickExportPath: () => Promise<
+    | { cancelled: true }
+    | { cancelled: false; filePath: string; error?: undefined }
+    | { cancelled: false; filePath?: undefined; error: string }
+  >;
+  knowledgePickImportPath: () => Promise<
+    | { cancelled: true }
+    | { cancelled: false; filePath: string; error?: undefined }
+    | { cancelled: false; filePath?: undefined; error: string }
+  >;
+
+  // sensi M7 / PERSONA-01 — lightweight resume persona.
+  personaPickFile: () => Promise<
+    | { cancelled: true; filePath?: undefined }
+    | { cancelled: false; filePath: string; error?: undefined }
+    | { cancelled: false; filePath?: undefined; error: string }
+  >
+  personaUploadResume: (filePath: string) => Promise<
+    { success: true; summary: PersonaSummaryIpc }
+    | { success: false; error: string }
+  >
+  personaGetSummary: () => Promise<
+    { success: true; summary: PersonaSummaryIpc | null }
+    | { success: false; error: string }
+  >
+  personaClear: () => Promise<
+    { success: true } | { success: false; error: string }
+  >
+
+  // sensi M7 / PERSONA-02 — per-meeting JD binding
+  personaPickJDFile: () => Promise<
+    | { cancelled: true; filePath?: undefined }
+    | { cancelled: false; filePath: string; error?: undefined }
+    | { cancelled: false; filePath?: undefined; error: string }
+  >
+  personaUploadJD: (filePath: string, eventId: string) => Promise<
+    { success: true; summary: PersonaSummaryIpc }
+    | { success: false; error: string }
+  >
+  personaGetJDForEvent: (eventId: string) => Promise<
+    { success: true; summary: PersonaSummaryIpc | null }
+    | { success: false; error: string }
+  >
+  personaClearJD: (eventId: string) => Promise<
+    { success: true } | { success: false; error: string }
+  >
+
+  // sensi M7 / PREP-01 — pre-meeting briefing
+  prepGetBriefing: (payload: { eventId: string; title: string; description?: string; force?: boolean }) => Promise<
+    | { success: true; briefing: PrepBriefingIpc }
+    | { success: false; error: string }
+  >
+  prepInvalidate: (eventId: string) => Promise<
+    { success: true } | { success: false; error: string }
+  >
+
+  // sensi M7 / KNOWLEDGE-02 — per-meeting document binding.
+  // `document` is the same shape the renderer already uses for
+  // `knowledgeListDocuments` (KnowledgeDocumentMetadata). We keep the type
+  // loose as `unknown` for the suggestions array to avoid cross-file
+  // coupling — the UI casts to `KnowledgeDocumentMetadata` on consumption.
+  knowledgeAttachToEvent: (docId: string, eventId: string) => Promise<
+    { success: true } | { success: false; error: string }
+  >;
+  knowledgeDetachFromEvent: (docId: string, eventId: string) => Promise<
+    { success: true } | { success: false; error: string }
+  >;
+  knowledgeListForEvent: (eventId: string) => Promise<
+    | { success: true; documents: KnowledgeDocumentMetadata[] }
+    | { success: false; error: string }
+  >;
+  knowledgeListEventsForDocument: (docId: string) => Promise<
+    { success: true; eventIds: string[] } | { success: false; error: string }
+  >;
+  knowledgeSuggestForEvent: (eventId: string, searchText: string, topK?: number) => Promise<
+    | { success: true; suggestions: Array<{ document: KnowledgeDocumentMetadata; distance: number }> }
+    | { success: false; error: string }
+  >;
+
+  // sensi M5-T5 — Rolling-response trigger mode (3 channels)
+  //
+  // Persistent cadence selector for the rolling-response loop.
+  //   'off'         — never auto-fires (keyboard shortcut still works)
+  //   'on-silence'  — auto-fires after ~1.5s of no final transcripts
+  //   'on-demand'   — only fires on explicit user action
+  // Persisted via SettingsManager; default is 'on-silence'. See
+  // DECISIONS.md D030 for the policy spec.
+  setRollingTriggerMode: (mode: 'off' | 'on-silence' | 'on-demand') => Promise<
+    { success: true } | { success: false; error: string }
+  >;
+  getRollingTriggerMode: () => Promise<'off' | 'on-silence' | 'on-demand'>;
+  // v2.14.8: auto-answer sensitivity (silence threshold in ms, 500–10_000).
+  setRollingTriggerSilenceMs: (ms: number) => Promise<
+    { success: true; silenceMs: number } | { success: false; error: string }
+  >;
+  getRollingTriggerSilenceMs: () => Promise<number>;
+  /**
+   * Subscribe to mode-change broadcasts. Returns an unsubscribe
+   * function. Fires when another window (or a keyboard shortcut)
+   * changes the mode so every visible mode-selector UI re-syncs.
+   */
+  onRollingTriggerModeChanged: (
+    callback: (mode: 'off' | 'on-silence' | 'on-demand') => void
+  ) => () => void;
+}
+
+// ─────────────────────────────────────────────────────────────────
+// sensi M4-T8 — Knowledge IPC shared types
+//
+// Mirror the main-process types from
+// electron/knowledge/knowledgeIpcHelpers.ts and KnowledgeStore.ts.
+// Defined here rather than imported because the renderer cannot
+// import main-process modules directly.
+// ─────────────────────────────────────────────────────────────────
+export type KnowledgeIpcErrorType =
+  | 'invalid_input'
+  | 'ingest_failed'
+  | 'query_failed'
+  | 'model_mismatch'
+  | 'provider_unavailable'
+  | 'not_found'
+  | 'dimension_mismatch'
+  | 'export_failed'
+  | 'import_failed'
+  | 'incompatible_format'
+  | 'internal';
+
+export interface KnowledgeIpcFailure {
+  success: false;
+  error: string;
+  errorType: KnowledgeIpcErrorType;
+}
+
+/**
+ * sensi M8 / PASS B — auth state + /me shapes shared with AuthManager.
+ */
+export interface SensiMeUsageIpc {
+  used: number
+  cap: number | null
+}
+
+export interface SensiMeIpc {
+  id: string
+  email: string
+  name: string | null
+  avatar_url: string | null
+  subscription: {
+    tier: 'free' | 'pro'
+    expires_at: string | null
+    has_stripe_customer: boolean
+  }
+  usage: {
+    what_to_answer: SensiMeUsageIpc
+    research: SensiMeUsageIpc
+    prep_briefing: SensiMeUsageIpc
+    // v2.16.0: optional — only present when backend supports it.
+    stt_seconds?: SensiMeUsageIpc
+  }
+}
+
+export interface SensiAuthStateIpc {
+  signedIn: boolean
+  userId: string | null
+  tier: 'free' | 'pro' | null
+  me: SensiMeIpc | null
+}
+
+export interface KnowledgeDocumentMetadata {
+  id: string;
+  name: string;
+  mime: string;
+  bytes: number;
+  embeddingModel: string;
+  embeddingDim: number;
+  pinned: boolean;
+  pinnedAt: string | null;
+  ingestedAt: string;
+  chunkCount: number;
+}
+
+/**
+ * sensi M7 / PERSONA-01 — Resume persona shape.
+ */
+export interface ResumePersonaIpc {
+  name: string
+  currentRole: string
+  yearsExperience: number
+  skills: string[]
+  education: string[]
+  topAchievements: string[]
+}
+
+/**
+ * sensi M7 / PERSONA-02 — JD persona shape.
+ */
+export interface JDPersonaIpc {
+  company: string
+  role: string
+  level: string
+  requiredSkills: string[]
+  niceToHaves: string[]
+  interviewRounds: string[]
+}
+
+/**
+ * sensi M7 / PERSONA-01/02 — IPC shape for the latest persona summary.
+ * `persona` is the union of Resume (kind='resume') and JD (kind='jd').
+ * Callers that need to discriminate check `kind` and narrow on
+ * `in`-tests before reading shape-specific fields.
+ */
+export interface PersonaSummaryIpc {
+  id: number
+  kind: 'resume' | 'jd'
+  sourceName: string | null
+  eventId: string | null
+  updatedAt: string
+  persona: ResumePersonaIpc | JDPersonaIpc
+}
+
+/**
+ * sensi M7 / PREP-01 — pre-meeting briefing shape.
+ */
+export interface PrepBriefingIpc {
+  eventId: string
+  title: string
+  generatedAt: number
+  brief: string
+  inputs: {
+    hasResume: boolean
+    hasJD: boolean
+    attachedDocCount: number
+    hasResearch: boolean
+    company?: string
+  }
+}
+
+export interface KnowledgeRetrievedChunk {
+  documentId: string;
+  documentName: string;
+  chunkIndex: number;
+  text: string;
+  distance: number;
 }
 
 declare global {

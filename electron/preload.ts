@@ -1,4 +1,9 @@
 import { contextBridge, ipcRenderer } from "electron"
+// sensi M1 Step 4: shared provider-status type. Imported via relative path
+// because the electron bundle is transpile-only (no path-alias rewriting at
+// runtime). The renderer reaches the same type via the `@providers/types`
+// Vite alias — see vite.config.mts.
+import type { ProviderId, ProviderStatus } from "./providers/types"
 
 // Types for the exposed Electron API
 interface ElectronAPI {
@@ -51,7 +56,7 @@ interface ElectronAPI {
   getAvailableOllamaModels: () => Promise<string[]>
   switchToOllama: (model?: string, url?: string) => Promise<{ success: boolean; error?: string }>
   switchToGemini: (apiKey?: string, modelId?: string) => Promise<{ success: boolean; error?: string }>
-  testLlmConnection: (provider: 'gemini' | 'groq' | 'openai' | 'claude', apiKey?: string) => Promise<{ success: boolean; error?: string }>
+  testLlmConnection: (provider: 'gemini' | 'groq' | 'openai' | 'claude' | 'minimax', apiKey?: string) => Promise<{ success: boolean; error?: string }>
   selectServiceAccount: () => Promise<{ success: boolean; path?: string; cancelled?: boolean; error?: string }>
 
   // API Key Management
@@ -60,12 +65,22 @@ interface ElectronAPI {
   setOpenaiApiKey: (apiKey: string) => Promise<{ success: boolean; error?: string }>
   setClaudeApiKey: (apiKey: string) => Promise<{ success: boolean; error?: string }>
   setNativelyApiKey: (apiKey: string) => Promise<{ success: boolean; error?: string }>
+  // sensi M1 Step 3: MiniMax credential setter, mirrors the pattern above
+  setMinimaxApiKey: (apiKey: string) => Promise<{ success: boolean; error?: string }>
+
+  // sensi M1 Step 4 — typed multi-provider key vault surface.
+  // See electron/providers/types.ts for the ProviderStatus shape.
+  // All four entries are non-bare-boolean per DECISIONS.md D007.
+  getConfiguredProviders: () => Promise<ProviderStatus[]>
+  setActiveProviderAndModel: (provider: ProviderId, model: string) => Promise<ProviderStatus>
+  getActiveProviderAndModel: () => Promise<{ provider: ProviderId | null; model: string | null }>
+  onLlmActiveChanged: (callback: (payload: { provider: ProviderId; model: string }) => void) => () => void
   getNativelyUsage: () => Promise<{ ok: boolean; plan?: string; quota?: { transcription: { used: number; limit: number; remaining: number }; ai: { used: number; limit: number; remaining: number }; search: { used: number; limit: number; remaining: number }; resets_at: string }; member_since?: string; error?: string; status?: number }>
-  getStoredCredentials: () => Promise<{ hasGeminiKey: boolean; hasGroqKey: boolean; hasOpenaiKey: boolean; hasClaudeKey: boolean; hasNativelyKey: boolean; googleServiceAccountPath: string | null; sttProvider: string; hasSttGroqKey: boolean; hasSttOpenaiKey: boolean; hasDeepgramKey: boolean; hasElevenLabsKey: boolean; hasAzureKey: boolean; azureRegion: string; hasIbmWatsonKey: boolean; ibmWatsonRegion: string; hasSonioxKey: boolean }>
+  getStoredCredentials: () => Promise<{ hasGeminiKey: boolean; hasGroqKey: boolean; hasOpenaiKey: boolean; hasClaudeKey: boolean; hasNativelyKey: boolean; hasMinimaxKey?: boolean; minimaxPreferredModel?: string; googleServiceAccountPath: string | null; sttProvider: string; hasSttGroqKey: boolean; hasSttOpenaiKey: boolean; hasDeepgramKey: boolean; hasElevenLabsKey: boolean; hasAzureKey: boolean; azureRegion: string; hasIbmWatsonKey: boolean; ibmWatsonRegion: string; hasSonioxKey: boolean; hasTavilyKey?: boolean }>
   // Free Trial
   startTrial:     () => Promise<{ ok: boolean; trial_token?: string; started_at?: string; expires_at?: string; expired?: boolean; already_used?: boolean; converted_to?: string | null; usage?: { ai: number; stt_seconds: number; search: number }; limits?: { duration_ms: number; ai_requests: number; stt_minutes: number; search_requests: number }; error?: string; status?: number }>
   getTrialStatus: () => Promise<{ ok: boolean; expired?: boolean; remaining_ms?: number; started_at?: string; expires_at?: string; converted_to?: string | null; usage?: { ai: number; stt_seconds: number; search: number }; limits?: object; error?: string }>
-  getLocalTrial:  () => Promise<{ hasToken: boolean; trialToken?: string; expiresAt?: string; startedAt?: string; expired?: boolean }>
+  getLocalTrial:  () => Promise<{ hasToken: boolean; expiresAt?: string; startedAt?: string; expired?: boolean }>
   convertTrial:   (choice: string) => Promise<{ ok: boolean }>
   endTrialByok:   () => Promise<{ success: boolean; error?: string }>
   onTrialEnded:   (cb: (data: { choice: string }) => void) => () => void
@@ -215,6 +230,26 @@ interface ElectronAPI {
   getCalendarStatus: () => Promise<{ connected: boolean; email?: string }>
   getUpcomingEvents: () => Promise<Array<{ id: string; title: string; startTime: string; endTime: string; link?: string; source: 'google' }>>
   calendarRefresh: () => Promise<{ success: boolean; error?: string }>
+  getGoogleOauthStatus: () => Promise<{ configured: boolean; maskedClientId: string | null }>
+  setGoogleOauthCredentials: (payload: { clientId: string; clientSecret: string }) => Promise<{ success: boolean; error?: string }>
+  clearGoogleOauthCredentials: () => Promise<{ success: boolean; error?: string }>
+
+  // Pre-meeting alerts
+  onPreMeetingAlert: (callback: (event: { id: string; title: string; startTime: string; endTime: string; link?: string }) => void) => () => void
+  preMeetingAcceptAlert: (event: { id: string; title: string }) => Promise<{ success: boolean; error?: string }>
+  preMeetingDismissAlert: (event: { id: string }) => Promise<{ success: boolean; error?: string }>
+  getPreMeetingAlertsEnabled: () => Promise<boolean>
+  setPreMeetingAlertsEnabled: (enabled: boolean) => Promise<{ success: boolean; error?: string }>
+  getMeetingAutoDetectEnabled: () => Promise<boolean>
+  setMeetingAutoDetectEnabled: (enabled: boolean) => Promise<{ success: boolean; error?: string }>
+  // M6-A: Live Coding mode
+  getLiveCodingModeEnabled: () => Promise<boolean>
+  setLiveCodingModeEnabled: (enabled: boolean) => Promise<{ success: boolean; error?: string }>
+  getOnlineAssessmentModeEnabled: () => Promise<boolean>
+  setOnlineAssessmentModeEnabled: (enabled: boolean) => Promise<{ success: boolean; error?: string }>
+  onOnlineAssessmentModeChanged: (callback: (enabled: boolean) => void) => () => void
+  getLiveScreenCaptureRunning: () => Promise<boolean>
+  onLiveScreenCaptureRunning: (callback: (running: boolean) => void) => () => void
 
   // Auto-Update
   onUpdateAvailable: (callback: (info: any) => void) => () => void
@@ -273,6 +308,45 @@ interface ElectronAPI {
   // Tavily Search API
   setTavilyApiKey: (apiKey: string) => Promise<{ success: boolean; error?: string }>;
 
+  // sensi M7 / RESEARCH-01: Standalone research
+  // sensi M8 / PASS B — sensi-cloud auth
+  authSignIn: () => Promise<{ success: boolean; error?: string }>;
+  authSignOut: () => Promise<{ success: boolean; error?: string }>;
+  authGetState: () => Promise<{ success: boolean; state?: unknown; error?: string }>;
+  authRefreshMe: () => Promise<{ success: boolean; me?: unknown; error?: string }>;
+  authOpenCheckout: () => Promise<{ success: boolean; error?: string }>;
+  authOpenPortal: () => Promise<{ success: boolean; error?: string }>;
+
+  // MEMORY-01 (v2.17.0) — cross-meeting memory engine
+  memoryGetEnabled: () => Promise<{ enabled: boolean }>;
+  memorySetEnabled: (enabled: boolean) => Promise<{ success: boolean }>;
+  memoryGetQueueSize: () => Promise<{ pending: number }>;
+  memoryPurge: () => Promise<{ success: boolean; deleted?: number; error?: string }>;
+
+  onAuthStateChanged: (callback: (state: unknown) => void) => () => void;
+  onCalendarConnectionChanged: (
+    callback: (status: { connected: boolean; email?: string }) => void,
+  ) => () => void;
+
+  researchRun: (query: string, scope?: 'company' | 'general') => Promise<{
+    success: boolean;
+    brief?: string;
+    query?: string;
+    scope?: 'company' | 'general';
+    sources?: Array<{ title: string; url: string }>;
+    error?: string;
+  }>;
+
+  // sensi M7 / MOTION-01: Video / GIF frame capture
+  motionStart: () => Promise<{ ok: boolean; maxFrames?: number; intervalMs?: number; error?: string }>;
+  motionStop: () => Promise<{ ok: boolean; frames?: string[]; durationMs?: number; error?: string }>;
+  motionStatus: () => Promise<{ recording: boolean; frameCount: number; elapsedMs: number; maxFrames: number; intervalMs: number }>;
+  motionSummarize: (framePaths: string[]) => Promise<{ success: boolean; brief?: string; frameCount?: number; error?: string }>;
+  motionCompare: (clipA: string[], clipB: string[]) => Promise<{ success: boolean; brief?: string; clipAFrames?: number; clipBFrames?: number; error?: string }>;
+  motionDiscard: (framePaths: string[]) => Promise<{ success: boolean; error?: string }>;
+  onMotionFrameCaptured: (callback: (data: { frameCount: number }) => void) => () => void;
+  onMotionAutoStopped: (callback: () => void) => () => void;
+
   // Overlay Opacity (Stealth Mode)
   setOverlayOpacity: (opacity: number) => Promise<void>;
   onOverlayOpacityChanged: (callback: (opacity: number) => void) => () => void;
@@ -293,6 +367,41 @@ interface ElectronAPI {
 
   // Platform
   platform: NodeJS.Platform;
+
+  // M4-T10 — Knowledge export/import. Four channels; see comments
+  // on the implementation below and DECISIONS.md D023.
+  knowledgeExport?: (filePath: string) => Promise<unknown>;
+  knowledgeImport?: (filePath: string) => Promise<unknown>;
+  knowledgePickExportPath?: () => Promise<unknown>;
+  knowledgePickImportPath?: () => Promise<unknown>;
+
+  // sensi M7 / PERSONA-01 — lightweight resume persona
+  personaPickFile?: () => Promise<unknown>;
+  personaUploadResume?: (filePath: string) => Promise<unknown>;
+  personaGetSummary?: () => Promise<unknown>;
+  personaClear?: () => Promise<unknown>;
+  // sensi M7 / PERSONA-02 — per-meeting JD binding
+  personaPickJDFile?: () => Promise<unknown>;
+  personaUploadJD?: (filePath: string, eventId: string) => Promise<unknown>;
+  personaGetJDForEvent?: (eventId: string) => Promise<unknown>;
+  personaClearJD?: (eventId: string) => Promise<unknown>;
+  // sensi M7 / PREP-01 — pre-meeting briefing
+  prepGetBriefing?: (payload: { eventId: string; title: string; description?: string; force?: boolean }) => Promise<unknown>;
+  prepInvalidate?: (eventId: string) => Promise<unknown>;
+
+  // sensi M7 / KNOWLEDGE-02 — per-meeting document binding
+  knowledgeAttachToEvent?: (docId: string, eventId: string) => Promise<{ success: boolean; error?: string }>;
+  knowledgeDetachFromEvent?: (docId: string, eventId: string) => Promise<{ success: boolean; error?: string }>;
+  knowledgeListForEvent?: (eventId: string) => Promise<{ success: boolean; documents?: unknown[]; error?: string }>;
+  knowledgeListEventsForDocument?: (docId: string) => Promise<{ success: boolean; eventIds?: string[]; error?: string }>;
+  knowledgeSuggestForEvent?: (eventId: string, searchText: string, topK?: number) => Promise<{ success: boolean; suggestions?: Array<{ document: unknown; distance: number }>; error?: string }>;
+
+  // M5-T5 — Rolling-response trigger mode. Two RPCs + one broadcast.
+  setRollingTriggerMode?: (mode: 'off' | 'on-silence' | 'on-demand') => Promise<unknown>;
+  getRollingTriggerMode?: () => Promise<unknown>;
+  setRollingTriggerSilenceMs?: (ms: number) => Promise<{ success: boolean; silenceMs?: number; error?: string }>;
+  getRollingTriggerSilenceMs?: () => Promise<number>;
+  onRollingTriggerModeChanged?: (callback: (mode: 'off' | 'on-silence' | 'on-demand') => void) => () => void;
 }
 
 export const PROCESSING_EVENTS = {
@@ -478,6 +587,10 @@ contextBridge.exposeInMainWorld("electronAPI", {
   openExternal: (url: string) => ipcRenderer.invoke("open-external", url),
   setUndetectable: (state: boolean) => ipcRenderer.invoke("set-undetectable", state),
   getUndetectable: () => ipcRenderer.invoke("get-undetectable"),
+  // v2.16.2: returns { capability: 'full'|'partial'|'unsupported', warning?: string }
+  getStealthCapability: () => ipcRenderer.invoke("get-stealth-capability"),
+  // v2.16.2: triggers a self-capture of the screen; saves PNG to Desktop and opens Explorer there.
+  stealthSelfCapture: () => ipcRenderer.invoke("stealth:self-capture"),
   setOverlayMousePassthrough: (enabled: boolean) => ipcRenderer.invoke("set-overlay-mouse-passthrough", enabled),
   toggleOverlayMousePassthrough: () => ipcRenderer.invoke("toggle-overlay-mouse-passthrough"),
   getOverlayMousePassthrough: () => ipcRenderer.invoke("get-overlay-mouse-passthrough"),
@@ -514,7 +627,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   getAvailableOllamaModels: () => ipcRenderer.invoke("get-available-ollama-models"),
   switchToOllama: (model?: string, url?: string) => ipcRenderer.invoke("switch-to-ollama", model, url),
   switchToGemini: (apiKey?: string, modelId?: string) => ipcRenderer.invoke("switch-to-gemini", apiKey, modelId),
-  testLlmConnection: (provider: 'gemini' | 'groq' | 'openai' | 'claude', apiKey: string) => ipcRenderer.invoke("test-llm-connection", provider, apiKey),
+  testLlmConnection: (provider: 'gemini' | 'groq' | 'openai' | 'claude' | 'minimax', apiKey: string) => ipcRenderer.invoke("test-llm-connection", provider, apiKey),
   selectServiceAccount: () => ipcRenderer.invoke("select-service-account"),
 
   // API Key Management
@@ -523,6 +636,21 @@ contextBridge.exposeInMainWorld("electronAPI", {
   setOpenaiApiKey: (apiKey: string) => ipcRenderer.invoke("set-openai-api-key", apiKey),
   setClaudeApiKey: (apiKey: string) => ipcRenderer.invoke("set-claude-api-key", apiKey),
   setNativelyApiKey: (apiKey: string) => ipcRenderer.invoke("set-natively-api-key", apiKey),
+  // sensi M1 Step 3: MiniMax credential setter — calls IPC `set-minimax-api-key`
+  setMinimaxApiKey: (apiKey: string) => ipcRenderer.invoke("set-minimax-api-key", apiKey),
+
+  // sensi M1 Step 4 — typed provider+model vault bindings.
+  getConfiguredProviders: () => ipcRenderer.invoke("llm:get-configured-providers"),
+  setActiveProviderAndModel: (provider: ProviderId, model: string) =>
+    ipcRenderer.invoke("llm:set-active-provider-and-model", provider, model),
+  getActiveProviderAndModel: () => ipcRenderer.invoke("llm:get-active-provider-and-model"),
+  onLlmActiveChanged: (callback: (payload: { provider: ProviderId; model: string }) => void) => {
+    const subscription = (_event: any, payload: { provider: ProviderId; model: string }) => callback(payload);
+    ipcRenderer.on("llm-active-changed", subscription);
+    return () => {
+      ipcRenderer.removeListener("llm-active-changed", subscription);
+    };
+  },
   getNativelyUsage: () => ipcRenderer.invoke("get-natively-usage"),
   getStoredCredentials: () => ipcRenderer.invoke("get-stored-credentials"),
 
@@ -799,6 +927,18 @@ contextBridge.exposeInMainWorld("electronAPI", {
     }
   },
 
+  // v2.15.0: fired when the rolling auto-answer is cancelled mid-stream
+  // because the interviewer started speaking again. Renderer swaps the
+  // "thinking…" indicator for "listening…" and waits for the next
+  // UtteranceEnd-driven re-fire.
+  onRollingStreamCancelled: (callback: () => void) => {
+    const subscription = () => callback()
+    ipcRenderer.on("rolling-stream-cancelled", subscription)
+    return () => {
+      ipcRenderer.removeListener("rolling-stream-cancelled", subscription)
+    }
+  },
+
 
   // Streaming Chat
   streamGeminiChat: (message: string, imagePaths?: string[], context?: string, options?: { skipSystemPrompt?: boolean, ignoreKnowledgeMode?: boolean }) => ipcRenderer.invoke("gemini-chat-stream", message, imagePaths, context, options),
@@ -936,6 +1076,45 @@ contextBridge.exposeInMainWorld("electronAPI", {
   getCalendarStatus: () => ipcRenderer.invoke('get-calendar-status'),
   getUpcomingEvents: () => ipcRenderer.invoke('get-upcoming-events'),
   calendarRefresh: () => ipcRenderer.invoke('calendar-refresh'),
+  // v2.5.4: Google OAuth credential management
+  getGoogleOauthStatus: () => ipcRenderer.invoke('get-google-oauth-status'),
+  setGoogleOauthCredentials: (payload: { clientId: string; clientSecret: string }) => ipcRenderer.invoke('set-google-oauth-credentials', payload),
+  clearGoogleOauthCredentials: () => ipcRenderer.invoke('clear-google-oauth-credentials'),
+
+  // Pre-meeting alerts (2 min before a calendar event)
+  onPreMeetingAlert: (callback: (event: { id: string; title: string; startTime: string; endTime: string; link?: string }) => void) => {
+    const subscription = (_: any, event: any) => callback(event);
+    ipcRenderer.on('pre-meeting-alert', subscription);
+    return () => {
+      ipcRenderer.removeListener('pre-meeting-alert', subscription);
+    };
+  },
+  preMeetingAcceptAlert: (event: { id: string; title: string }) => ipcRenderer.invoke('pre-meeting-alert-accept', event),
+  preMeetingDismissAlert: (event: { id: string }) => ipcRenderer.invoke('pre-meeting-alert-dismiss', event),
+  getPreMeetingAlertsEnabled: () => ipcRenderer.invoke('get-pre-meeting-alerts-enabled'),
+  setPreMeetingAlertsEnabled: (enabled: boolean) => ipcRenderer.invoke('set-pre-meeting-alerts-enabled', enabled),
+  getMeetingAutoDetectEnabled: () => ipcRenderer.invoke('get-meeting-auto-detect-enabled'),
+  setMeetingAutoDetectEnabled: (enabled: boolean) => ipcRenderer.invoke('set-meeting-auto-detect-enabled', enabled),
+  // M6-A: Live Coding mode
+  getLiveCodingModeEnabled: () => ipcRenderer.invoke('get-live-coding-mode-enabled'),
+  setLiveCodingModeEnabled: (enabled: boolean) => ipcRenderer.invoke('set-live-coding-mode-enabled', enabled),
+  getOnlineAssessmentModeEnabled: () => ipcRenderer.invoke('get-online-assessment-mode-enabled'),
+  setOnlineAssessmentModeEnabled: (enabled: boolean) => ipcRenderer.invoke('set-online-assessment-mode-enabled', enabled),
+  onOnlineAssessmentModeChanged: (callback: (enabled: boolean) => void) => {
+    const subscription = (_: any, enabled: boolean) => callback(!!enabled);
+    ipcRenderer.on('online-assessment-mode-changed', subscription);
+    return () => {
+      ipcRenderer.removeListener('online-assessment-mode-changed', subscription);
+    };
+  },
+  getLiveScreenCaptureRunning: () => ipcRenderer.invoke('get-live-screen-capture-running'),
+  onLiveScreenCaptureRunning: (callback: (running: boolean) => void) => {
+    const subscription = (_: any, running: boolean) => callback(running);
+    ipcRenderer.on('live-screen-capture-running', subscription);
+    return () => {
+      ipcRenderer.removeListener('live-screen-capture-running', subscription);
+    };
+  },
 
   // Auto-Update
   onUpdateAvailable: (callback: (info: any) => void) => {
@@ -1077,9 +1256,57 @@ contextBridge.exposeInMainWorld("electronAPI", {
   // Tavily Search API
   setTavilyApiKey: (apiKey: string) => ipcRenderer.invoke('set-tavily-api-key', apiKey),
 
+  // sensi M7 / RESEARCH-01: Standalone research (Tavily -> LLM brief)
+  researchRun: (query: string, scope?: 'company' | 'general') => ipcRenderer.invoke('research:run', query, scope ?? 'general'),
+
+  // sensi M8 / PASS B (v2.13.0): sensi-cloud auth
+  authSignIn: () => ipcRenderer.invoke('auth:sign-in'),
+  authSignOut: () => ipcRenderer.invoke('auth:sign-out'),
+  authGetState: () => ipcRenderer.invoke('auth:get-state'),
+  authRefreshMe: () => ipcRenderer.invoke('auth:refresh-me'),
+  authOpenCheckout: () => ipcRenderer.invoke('auth:open-checkout'),
+  authOpenPortal: () => ipcRenderer.invoke('auth:open-portal'),
+
+  // MEMORY-01 (v2.17.0) — cross-meeting memory engine
+  memoryGetEnabled: () => ipcRenderer.invoke('memory:get-enabled'),
+  memorySetEnabled: (enabled: boolean) => ipcRenderer.invoke('memory:set-enabled', enabled),
+  memoryGetQueueSize: () => ipcRenderer.invoke('memory:get-queue-size'),
+  memoryPurge: () => ipcRenderer.invoke('memory:purge'),
+
+  onAuthStateChanged: (callback: (state: unknown) => void) => {
+    const sub = (_: unknown, state: unknown) => callback(state);
+    ipcRenderer.on('auth-state-changed', sub);
+    return () => ipcRenderer.removeListener('auth-state-changed', sub);
+  },
+  onCalendarConnectionChanged: (
+    callback: (status: { connected: boolean; email?: string }) => void,
+  ) => {
+    const sub = (_: unknown, status: { connected: boolean; email?: string }) => callback(status);
+    ipcRenderer.on('calendar-connection-changed', sub);
+    return () => ipcRenderer.removeListener('calendar-connection-changed', sub);
+  },
+
+  // sensi M7 / MOTION-01: Video / GIF frame capture + analysis
+  motionStart: () => ipcRenderer.invoke('motion:start'),
+  motionStop: () => ipcRenderer.invoke('motion:stop'),
+  motionStatus: () => ipcRenderer.invoke('motion:status'),
+  motionSummarize: (framePaths: string[]) => ipcRenderer.invoke('motion:summarize', framePaths),
+  motionCompare: (clipA: string[], clipB: string[]) => ipcRenderer.invoke('motion:compare', clipA, clipB),
+  motionDiscard: (framePaths: string[]) => ipcRenderer.invoke('motion:discard', framePaths),
+  onMotionFrameCaptured: (callback: (data: { frameCount: number }) => void) => {
+    const sub = (_: any, data: { frameCount: number }) => callback(data);
+    ipcRenderer.on('motion-frame-captured', sub);
+    return () => ipcRenderer.removeListener('motion-frame-captured', sub);
+  },
+  onMotionAutoStopped: (callback: () => void) => {
+    const sub = () => callback();
+    ipcRenderer.on('motion-auto-stopped', sub);
+    return () => ipcRenderer.removeListener('motion-auto-stopped', sub);
+  },
+
   // Dynamic Model Discovery
-  fetchProviderModels: (provider: 'gemini' | 'groq' | 'openai' | 'claude', apiKey: string) => ipcRenderer.invoke('fetch-provider-models', provider, apiKey),
-  setProviderPreferredModel: (provider: 'gemini' | 'groq' | 'openai' | 'claude', modelId: string) => ipcRenderer.invoke('set-provider-preferred-model', provider, modelId),
+  fetchProviderModels: (provider: 'gemini' | 'groq' | 'openai' | 'claude' | 'minimax', apiKey: string) => ipcRenderer.invoke('fetch-provider-models', provider, apiKey),
+  setProviderPreferredModel: (provider: 'gemini' | 'groq' | 'openai' | 'claude' | 'minimax', modelId: string) => ipcRenderer.invoke('set-provider-preferred-model', provider, modelId),
 
   // License Management
   licenseActivate: (key: string) => ipcRenderer.invoke('license:activate', key),
@@ -1128,11 +1355,104 @@ contextBridge.exposeInMainWorld("electronAPI", {
 
   // Platform
   platform: process.platform,
+
+  // sensi M4-T8 — Knowledge base (eight narrow typed channels).
+  // These mirror the eight public methods of the M4-T6
+  // KnowledgeOrchestrator 1:1, except getDocumentText which is
+  // replaced by the bounded `knowledgeGetDocumentPreview` handler.
+  // Raw unbounded document text is never exposed to the renderer.
+  // See DECISIONS.md D021.
+  knowledgeIngestDocument: (filePath: string) =>
+    ipcRenderer.invoke('knowledge-ingest-document', filePath),
+  knowledgeListDocuments: () =>
+    ipcRenderer.invoke('knowledge-list-documents'),
+  knowledgeDeleteDocument: (id: string) =>
+    ipcRenderer.invoke('knowledge-delete-document', id),
+  knowledgePinDocument: (id: string) =>
+    ipcRenderer.invoke('knowledge-pin-document', id),
+  knowledgeUnpinDocument: (id: string) =>
+    ipcRenderer.invoke('knowledge-unpin-document', id),
+  knowledgeListPinned: () =>
+    ipcRenderer.invoke('knowledge-list-pinned'),
+  knowledgeQuery: (payload: {
+    query: string;
+    topK: number;
+    includePinned?: boolean;
+    documentIds?: string[];
+  }) => ipcRenderer.invoke('knowledge-query', payload),
+  knowledgeGetDocumentPreview: (id: string, maxChars?: number) =>
+    ipcRenderer.invoke('knowledge-get-document-preview', id, maxChars),
+
+  // sensi M4-T10 — Knowledge base export/import (four channels total).
+  // Renderer calls the pick-* helpers to open a save/open dialog in
+  // main (paths stay on the main side), then calls export/import with
+  // the returned filePath. Separation of dialog from IO keeps the
+  // transfer module pure and DI-testable.
+  knowledgeExport: (filePath: string) =>
+    ipcRenderer.invoke('knowledge-export', filePath),
+  knowledgeImport: (filePath: string) =>
+    ipcRenderer.invoke('knowledge-import', filePath),
+  knowledgePickExportPath: () =>
+    ipcRenderer.invoke('knowledge-pick-export-path'),
+  knowledgePickImportPath: () =>
+    ipcRenderer.invoke('knowledge-pick-import-path'),
+
+  // sensi M7 / PERSONA-01 — lightweight resume persona
+  personaPickFile: () => ipcRenderer.invoke('persona:pick-file'),
+  personaUploadResume: (filePath: string) => ipcRenderer.invoke('persona:upload-resume', filePath),
+  personaGetSummary: () => ipcRenderer.invoke('persona:get-summary'),
+  personaClear: () => ipcRenderer.invoke('persona:clear'),
+
+  // sensi M7 / PERSONA-02 — per-meeting JD binding
+  personaPickJDFile: () => ipcRenderer.invoke('persona:pick-jd-file'),
+  personaUploadJD: (filePath: string, eventId: string) =>
+    ipcRenderer.invoke('persona:upload-jd', filePath, eventId),
+  personaGetJDForEvent: (eventId: string) =>
+    ipcRenderer.invoke('persona:get-jd-for-event', eventId),
+  personaClearJD: (eventId: string) =>
+    ipcRenderer.invoke('persona:clear-jd', eventId),
+
+  // sensi M7 / PREP-01 — pre-meeting briefing
+  prepGetBriefing: (payload: { eventId: string; title: string; description?: string; force?: boolean }) =>
+    ipcRenderer.invoke('prep:get-briefing', payload),
+  prepInvalidate: (eventId: string) => ipcRenderer.invoke('prep:invalidate', eventId),
+
+  // sensi M7 / KNOWLEDGE-02 — per-meeting document binding
+  knowledgeAttachToEvent: (docId: string, eventId: string) =>
+    ipcRenderer.invoke('knowledge:attach-to-event', docId, eventId),
+  knowledgeDetachFromEvent: (docId: string, eventId: string) =>
+    ipcRenderer.invoke('knowledge:detach-from-event', docId, eventId),
+  knowledgeListForEvent: (eventId: string) =>
+    ipcRenderer.invoke('knowledge:list-for-event', eventId),
+  knowledgeListEventsForDocument: (docId: string) =>
+    ipcRenderer.invoke('knowledge:list-events-for-document', docId),
+  knowledgeSuggestForEvent: (eventId: string, searchText: string, topK?: number) =>
+    ipcRenderer.invoke('knowledge:suggest-for-event', eventId, searchText, topK ?? 3),
+
+  // sensi M5-T5 — Rolling-response trigger mode (two channels, persisted via SettingsManager)
+  setRollingTriggerMode: (mode: 'off' | 'on-silence' | 'on-demand') =>
+    ipcRenderer.invoke('set-rolling-trigger-mode', mode),
+  getRollingTriggerMode: () =>
+    ipcRenderer.invoke('get-rolling-trigger-mode'),
+  // v2.14.8 — auto-answer sensitivity (silence threshold in ms)
+  setRollingTriggerSilenceMs: (ms: number) =>
+    ipcRenderer.invoke('set-rolling-trigger-silence-ms', ms),
+  getRollingTriggerSilenceMs: () =>
+    ipcRenderer.invoke('get-rolling-trigger-silence-ms'),
+  onRollingTriggerModeChanged: (
+    callback: (mode: 'off' | 'on-silence' | 'on-demand') => void
+  ) => {
+    const listener = (_e: any, data: { mode: 'off' | 'on-silence' | 'on-demand' }) => callback(data.mode);
+    ipcRenderer.on('rolling-trigger-mode-changed', listener);
+    return () => {
+      ipcRenderer.removeListener('rolling-trigger-mode-changed', listener);
+    };
+  },
 } as ElectronAPI)
 
 // Renderer-side console forwarding to main-process log file.
 // When verbose logging is on, patch console.log/warn/error so that renderer
-// output appears in ~/Documents/natively_debug.log alongside main-process logs.
+// output appears in ~/Documents/sensi_debug.log alongside main-process logs.
 ;(function patchRendererConsole() {
   let _verbose = false;
 

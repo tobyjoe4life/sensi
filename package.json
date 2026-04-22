@@ -1,8 +1,8 @@
 {
-  "name": "natively",
-  "version": "2.4.0",
+  "name": "sensi",
+  "version": "2.17.0",
   "main": "dist-electron/electron/main.js",
-  "description": "Natively is a meeting notes app that uses AI to generate notes from your meetings.",
+  "description": "sensi is a personal desktop AI copilot for meetings, interviews, and live knowledge work.",
   "scripts": {
     "clean": "rimraf dist dist-electron",
     "dev": "vite",
@@ -10,8 +10,14 @@
     "build:electron": "node scripts/build-electron.js",
     "build:electron:tsc": "tsc -p electron/tsconfig.json",
     "typecheck:electron": "tsc -p electron/tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "test:kb-schema": "cross-env ELECTRON_RUN_AS_NODE=1 electron electron/__tests__/knowledgeSchema.electron.cjs",
+    "test:kb-store": "npm run build:electron && cross-env ELECTRON_RUN_AS_NODE=1 electron electron/__tests__/knowledgeStore.electron.cjs",
+    "test:kb-transfer": "npm run build:electron && cross-env ELECTRON_RUN_AS_NODE=1 electron electron/__tests__/knowledgeTransfer.electron.cjs",
     "preview": "vite preview",
-    "postinstall": "cross-env SHARP_IGNORE_GLOBAL_LIBVIPS=1 npm rebuild sharp && node scripts/download-models.js && node scripts/ensure-sqlite-vec.js && node scripts/patch-electron-plist.js",
+    "postinstall": "cross-env SHARP_IGNORE_GLOBAL_LIBVIPS=1 npm rebuild sharp && node scripts/download-models.js && node scripts/ensure-sqlite-vec.js && node scripts/patch-electron-plist.js && electron-rebuild -w better-sqlite3 -f",
     "electron:dev": "npm run build:electron && cross-env NODE_ENV=development electron .",
     "electron:build": "npm run build:electron && cross-env NODE_ENV=production electron .",
     "app:dev": "concurrently \"npm run dev -- --port 5180 --strictPort\" \"wait-on http://localhost:5180 && npm run electron:dev\"",
@@ -19,13 +25,23 @@
     "watch": "tsc -p electron/tsconfig.json --watch",
     "start": "npm run app:dev",
     "dist": "npm run app:build",
-    "build:native": "node scripts/build-native.js"
+    "dist:portable": "npm run build && npm run build:electron && npx electron-builder --win portable",
+    "build:native": "node scripts/build-native.js",
+    "icons": "node scripts/generate-icons.js"
   },
   "build": {
     "generateUpdatesFilesForAllChannels": true,
-    "appId": "com.electron.meeting-notes",
+    "appId": "com.tobyjoe.sensi",
     "afterPack": "./scripts/ad-hoc-sign.js",
-    "productName": "Natively",
+    "productName": "sensi",
+    "protocols": [
+      {
+        "name": "sensi",
+        "schemes": [
+          "sensi"
+        ]
+      }
+    ],
     "files": [
       "dist",
       "dist-electron",
@@ -34,7 +50,12 @@
       "node_modules",
       "!**/native-module/target",
       "!**/native-module/src",
-      "!**/native-module/.cargo"
+      "!**/native-module/.cargo",
+      "!**/*.{iobj,ipdb,pdb,ilk,exp,lib,obj,o}",
+      "!**/*.map",
+      "!**/@typescript/native-preview*/**",
+      "!**/onnxruntime-node/bin/napi-v3/darwin/**",
+      "!**/onnxruntime-node/bin/napi-v3/linux/**"
     ],
     "asarUnpack": [
       "**/*.node",
@@ -48,10 +69,6 @@
       {
         "from": "assets/",
         "to": "assets/"
-      },
-      {
-        "from": "assets/natively.icns",
-        "to": "natively.icns"
       },
       {
         "from": "resources/models/",
@@ -76,12 +93,12 @@
           ]
         }
       ],
-      "icon": "assets/natively.icns",
+      "icon": "assets/icon.icns",
       "identity": null,
       "hardenedRuntime": false,
       "extendInfo": {
-        "NSScreenCaptureUsageDescription": "Natively needs Screen Recording permission to capture system audio for meeting transcription.",
-        "NSMicrophoneUsageDescription": "Natively needs microphone access to transcribe your voice during meetings."
+        "NSScreenCaptureUsageDescription": "sensi needs Screen Recording permission to capture system audio for meeting transcription.",
+        "NSMicrophoneUsageDescription": "sensi needs microphone access to transcribe your voice during meetings."
       }
     },
     "win": {
@@ -89,8 +106,7 @@
         {
           "target": "nsis",
           "arch": [
-            "x64",
-            "ia32"
+            "x64"
           ]
         },
         {
@@ -122,17 +138,17 @@
       "category": "Office"
     },
     "nsis": {
-      "oneClick": false,
+      "oneClick": true,
       "perMachine": false,
-      "allowToChangeInstallationDirectory": true,
       "deleteAppDataOnUninstall": false,
+      "runAfterFinish": true,
       "artifactName": "${productName}-Setup-${version}.${ext}"
     },
     "publish": [
       {
         "provider": "github",
-        "owner": "evinjohnn",
-        "repo": "natively-cluely-ai-assistant",
+        "owner": "tobyjoe4life",
+        "repo": "sensi",
         "releaseType": "release"
       }
     ]
@@ -158,6 +174,7 @@
     "@typescript-eslint/eslint-plugin": "^8.14.0",
     "@typescript-eslint/parser": "^8.14.0",
     "@vitejs/plugin-react": "^4.3.3",
+    "@vitest/coverage-v8": "^1.6.1",
     "autoprefixer": "^10.4.20",
     "concurrently": "^9.1.0",
     "cross-env": "^7.0.3",
@@ -166,6 +183,7 @@
     "electron-builder": "^26.8.1",
     "electron-is-dev": "^3.0.1",
     "electron-rebuild": "^3.2.9",
+    "png-to-ico": "^3.0.1",
     "postcss": "^8.4.49",
     "rimraf": "^6.0.1",
     "tailwindcss": "^3.4.15",
@@ -173,6 +191,7 @@
     "vite": "^5.4.11",
     "vite-plugin-electron": "^0.28.8",
     "vite-plugin-electron-renderer": "^0.14.6",
+    "vitest": "^1.6.1",
     "wait-on": "^8.0.1"
   },
   "dependencies": {

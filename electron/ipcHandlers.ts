@@ -18,28 +18,13 @@ export function initializeIpcHandlers(appState: AppState): void {
   };
 
   /**
-   * Returns true if the user has an active premium license OR an unexpired free trial.
-   * Used to gate profile intelligence features (resume upload, JD upload, company research, etc.).
+   * Returns true if the user has access to gated profile intelligence features.
+   * sensi M0-T5: personal-use mode unconditionally unlocks everything via the
+   * LicenseManager stub. The trial-token branch was removed with the rest of the
+   * natively-cloud trial surface. See DECISIONS.md D003.
    */
   const isProOrTrialActive = (): boolean => {
-    // 1. Full premium license (Dodo / Gumroad / Natively API subscription)
-    try {
-      const { LicenseManager } = require('../premium/electron/services/LicenseManager');
-      if (LicenseManager.getInstance().isPremium()) return true;
-    } catch { /* premium module not available */ }
-
-    // 2. Active free trial (token present and not expired)
-    try {
-      const { CredentialsManager } = require('./services/CredentialsManager');
-      const cm = CredentialsManager.getInstance();
-      const token = cm.getTrialToken();
-      if (!token) return false;
-      const expiresAt = cm.getTrialExpiresAt();
-      if (!expiresAt) return false;
-      return new Date(expiresAt).getTime() > Date.now();
-    } catch {
-      return false;
-    }
+    return true;
   };
 
   // --- NEW Test Helper ---
@@ -586,6 +571,48 @@ export function initializeIpcHandlers(appState: AppState): void {
     return { success: true }
   })
 
+  // v2.16.2: expose the Windows-build-based stealth-capability probe so
+  // the renderer can warn users whose OS cannot fully honour
+  // Undetectable (Win10 pre-20H1 = modern screen-share still sees sensi).
+  safeHandle("get-stealth-capability", async () => {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { probeStealthCapability } = require('./utils/stealthCapability') as typeof import('./utils/stealthCapability');
+    return probeStealthCapability();
+  });
+
+  // v2.16.2: self-test. Uses desktopCapturer to grab a frame of the user's
+  // own screen and save it as PNG. The user opens the PNG and visually
+  // confirms whether sensi is visible. If sensi appears = local stealth
+  // is not applying (tell us). If sensi is invisible = stealth works;
+  // any visibility to other participants is on THEIR capture pipeline
+  // (remote desktop, kernel hooks, HDMI capture).
+  safeHandle("stealth:self-capture", async () => {
+    try {
+      const sources = await desktopCapturer.getSources({
+        types: ['screen'],
+        thumbnailSize: { width: 1920, height: 1080 },
+      });
+      const primary = sources[0];
+      if (!primary) {
+        return { success: false, error: 'No display source found.' };
+      }
+      const pngBuffer = primary.thumbnail.toPNG();
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const fs = require('node:fs') as typeof import('node:fs');
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const path = require('node:path') as typeof import('node:path');
+      const desktopDir = app.getPath('desktop');
+      const filename = `sensi-stealth-test-${Date.now()}.png`;
+      const outPath = path.join(desktopDir, filename);
+      fs.writeFileSync(outPath, pngBuffer);
+      void shell.openPath(desktopDir);
+      return { success: true, path: outPath };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return { success: false, error: msg };
+    }
+  });
+
   safeHandle("get-undetectable", async () => {
     return appState.getUndetectable()
   })
@@ -634,7 +661,7 @@ export function initializeIpcHandlers(appState: AppState): void {
 
   safeHandle("get-log-file-path", async () => {
     try {
-      return path.join(app.getPath('documents'), 'natively_debug.log');
+      return path.join(app.getPath('documents'), 'sensi_debug.log');
     } catch {
       return null;
     }
@@ -642,7 +669,7 @@ export function initializeIpcHandlers(appState: AppState): void {
 
   safeHandle("open-log-file", async () => {
     try {
-      const logPath = path.join(app.getPath('documents'), 'natively_debug.log');
+      const logPath = path.join(app.getPath('documents'), 'sensi_debug.log');
       // Ensure the file exists before opening
       if (!fs.existsSync(logPath)) {
         fs.writeFileSync(logPath, '');
@@ -679,6 +706,193 @@ export function initializeIpcHandlers(appState: AppState): void {
       // console.error("Error getting current LLM config:", error);
       throw error;
     }
+  });
+
+  // ─────────────────────────────────────────────────────────────────────
+  // sensi M1 Step 4 — Typed ProviderStatus IPC surface.
+  //
+  // Three new channels expose the multi-provider key vault to the renderer
+  // using the typed `ProviderStatus` shape from electron/providers/types.ts.
+  // Per DECISIONS.md D007 these handlers NEVER return a bare boolean for
+  // provider readiness — the renderer always gets the full snapshot.
+  //
+  //   llm:get-configured-providers       → ProviderStatus[]
+  //   llm:set-active-provider-and-model  → ProviderStatus (the new active one)
+  //   llm:get-active-provider-and-model  → { provider, model } pair
+  //
+  // The handlers delegate to CredentialsManager (M1 Step 4) for persisted
+  // state and to LLMHelper.setModel() for runtime client switching. They
+  // broadcast `llm-active-changed` to all open windows so the header pill
+  // and any other listeners update in lockstep.
+  // ─────────────────────────────────────────────────────────────────────
+  type ProviderId = 'minimax' | 'claude' | 'gemini' | 'groq' | 'openai' | 'ollama';
+  interface ProviderStatus {
+    provider: ProviderId;
+    configured: boolean;
+    active: boolean;
+    models: string[];
+    activeModel: string | null;
+    lastError?: string;
+  }
+  const PROVIDER_ORDER: ProviderId[] = ['minimax', 'gemini', 'claude', 'openai', 'groq', 'ollama'];
+
+  /**
+   * Build a single ProviderStatus snapshot. Shared by the list and single
+   * getters so the shape stays consistent.
+   */
+  const buildProviderStatus = async (provider: ProviderId): Promise<ProviderStatus> => {
+    const { CredentialsManager } = require('./services/CredentialsManager');
+    const cm = CredentialsManager.getInstance();
+    const active = cm.getActiveProviderAndModel();
+    const isActive = active.provider === provider;
+
+    let configured = false;
+    let models: string[] = [];
+
+    if (provider === 'ollama') {
+      // Ollama is "configured" when the local server is reachable AND has at
+      // least one model installed. Reuse the existing helper that the tray /
+      // settings already use rather than ping the daemon ourselves.
+      try {
+        const llmHelper = appState.processingHelper.getLLMHelper();
+        const ollamaModels = await llmHelper.getOllamaModels();
+        if (Array.isArray(ollamaModels) && ollamaModels.length > 0) {
+          configured = true;
+          // Prefix with "ollama-" to match the convention used by setModel()
+          // in LLMHelper — see LLMHelper.setModel branch around line 234.
+          models = ollamaModels.map((m: string) => `ollama-${m}`);
+        }
+      } catch (e) {
+        configured = false;
+        models = [];
+      }
+    } else {
+      // Cloud provider: configured iff a key is stored. Models come from the
+      // static baseline registry plus the user's preferred-model override
+      // (if it's not already in the baseline).
+      const keyGetterMap: Record<Exclude<ProviderId, 'ollama'>, () => string | undefined> = {
+        minimax: () => cm.getMinimaxApiKey(),
+        gemini:  () => cm.getGeminiApiKey(),
+        claude:  () => cm.getClaudeApiKey(),
+        openai:  () => cm.getOpenaiApiKey(),
+        groq:    () => cm.getGroqApiKey(),
+      };
+      const key = keyGetterMap[provider]?.();
+      configured = !!(key && key.trim().length > 0);
+
+      if (configured) {
+        const { STANDARD_CLOUD_MODELS } = require('./shared/standardCloudModels');
+        const entry = STANDARD_CLOUD_MODELS[provider];
+        if (entry) {
+          const baseline: string[] = [...entry.ids];
+          const preferred = cm.getPreferredModel(provider);
+          if (preferred && !baseline.includes(preferred)) {
+            baseline.push(preferred);
+          }
+          models = baseline;
+        }
+      }
+    }
+
+    return {
+      provider,
+      configured,
+      active: isActive && configured,
+      models,
+      activeModel: isActive ? (active.model ?? null) : null,
+    };
+  };
+
+  /**
+   * llm:get-configured-providers → ProviderStatus[] for all 6 providers.
+   *
+   * Returns every provider in stable order regardless of whether it's
+   * configured — the renderer filters as needed for display. This is a
+   * full snapshot, fast to compute (one credential lookup per provider plus
+   * one Ollama daemon ping). Called on ModelSelectorWindow open and on
+   * `llm-active-changed` broadcasts.
+   */
+  safeHandle("llm:get-configured-providers", async (): Promise<ProviderStatus[]> => {
+    const results: ProviderStatus[] = [];
+    for (const provider of PROVIDER_ORDER) {
+      try {
+        results.push(await buildProviderStatus(provider));
+      } catch (e: any) {
+        // Hard fail on any single provider becomes a degraded ProviderStatus
+        // entry rather than aborting the whole list — the renderer can still
+        // render the other providers and surface lastError on the broken one.
+        results.push({
+          provider,
+          configured: false,
+          active: false,
+          models: [],
+          activeModel: null,
+          lastError: e?.message || 'unknown error',
+        });
+      }
+    }
+    return results;
+  });
+
+  /**
+   * llm:get-active-provider-and-model → { provider, model } pair.
+   *
+   * Fast getter for the header pill at component mount. The pair is the
+   * persisted source of truth from CredentialsManager. Returns nulls when
+   * the user has not selected anything yet (fresh install).
+   */
+  safeHandle("llm:get-active-provider-and-model", async () => {
+    const { CredentialsManager } = require('./services/CredentialsManager');
+    return CredentialsManager.getInstance().getActiveProviderAndModel();
+  });
+
+  /**
+   * llm:set-active-provider-and-model(provider, model) → ProviderStatus
+   *
+   * 1. Persists the new pair to credentials.enc via CredentialsManager
+   * 2. Updates the runtime LLMHelper.currentModelId via setModel()
+   * 3. Broadcasts `llm-active-changed` to every open window
+   * 4. Also broadcasts the legacy `model-changed` event so any existing
+   *    listener (older ModelSelectorWindow, tray, etc.) stays in sync.
+   * 5. Returns the updated ProviderStatus for the new active provider so
+   *    the caller can update local state without an extra round-trip.
+   */
+  safeHandle("llm:set-active-provider-and-model", async (_, provider: ProviderId, model: string): Promise<ProviderStatus> => {
+    const { CredentialsManager } = require('./services/CredentialsManager');
+    const cm = CredentialsManager.getInstance();
+
+    // Persist
+    cm.setActiveProviderAndModel(provider, model);
+
+    // Wire into LLMHelper. setModel() already classifies the model ID and
+    // dispatches the correct provider branch (Step 2 added MiniMax to that
+    // chain ahead of OpenAI). Custom/curl providers are passed in case the
+    // model ID is a custom-provider ID.
+    const llmHelper = appState.processingHelper.getLLMHelper();
+    const customProviders = [
+      ...(cm.getCurlProviders() || []),
+      ...(cm.getCustomProviders() || []),
+    ];
+    llmHelper.setModel(model, customProviders);
+
+    // Re-init the IntelligenceEngine so any in-flight stream is cancelled
+    // and the new model takes effect on the next request. Same pattern as
+    // the per-provider key setters above.
+    appState.getIntelligenceManager().resetEngine();
+    appState.getIntelligenceManager().initializeLLMs();
+
+    // Broadcast to all open windows. The new typed event carries both the
+    // provider and the model; the legacy `model-changed` event is kept for
+    // backward compatibility with the existing ModelSelectorWindow listener.
+    const payload = { provider, model };
+    BrowserWindow.getAllWindows().forEach(win => {
+      if (!win.isDestroyed()) {
+        win.webContents.send('llm-active-changed', payload);
+        win.webContents.send('model-changed', model);
+      }
+    });
+
+    return await buildProviderStatus(provider);
   });
 
   safeHandle("get-available-ollama-models", async () => {
@@ -844,6 +1058,32 @@ export function initializeIpcHandlers(appState: AppState): void {
     }
   });
 
+  // sensi M1 Step 3: MiniMax credential setter — mirrors set-gemini/groq/openai/claude.
+  // Persists via CredentialsManager (safeStorage-encrypted), then immediately rewires
+  // the runtime LLMHelper.minimaxClient so the user can switch to MiniMax in the same
+  // session without restarting the app. Passing an empty string clears both the
+  // stored key and the live client.
+  safeHandle("set-minimax-api-key", async (_, apiKey: string) => {
+    try {
+      const { CredentialsManager } = require('./services/CredentialsManager');
+      CredentialsManager.getInstance().setMinimaxApiKey(apiKey);
+
+      // Also update the LLMHelper immediately (passing null clears the client)
+      const llmHelper = appState.processingHelper.getLLMHelper();
+      llmHelper.setMinimaxApiKey(apiKey ? apiKey : null);
+
+      // CQ-06 fix: cancel in-flight stream before re-init (engine only, not session)
+      appState.getIntelligenceManager().resetEngine();
+      // Re-init IntelligenceManager
+      appState.getIntelligenceManager().initializeLLMs();
+
+      return { success: true };
+    } catch (error: any) {
+      console.error("Error saving MiniMax API key:", error);
+      return { success: false, error: error.message };
+    }
+  });
+
   // ── Usage cache (60-second TTL, keyed by API key) ──────────────────────────
   const _usageCache = new Map<string, { data: any; ts: number }>();
   const USAGE_CACHE_TTL_MS = 60_000;
@@ -929,34 +1169,9 @@ export function initializeIpcHandlers(appState: AppState): void {
 
 
   safeHandle("get-natively-usage", async () => {
-    try {
-      const { CredentialsManager } = require('./services/CredentialsManager');
-      const key = CredentialsManager.getInstance().getNativelyApiKey();
-      if (!key) return { ok: false, error: 'no_key' };
-
-      // Return cached value if it's still fresh
-      const cached = _usageCache.get(key);
-      if (cached && Date.now() - cached.ts < USAGE_CACHE_TTL_MS) {
-        return cached.data;
-      }
-
-      const res = await fetch('https://api.natively.software/v1/usage', {
-        headers: { 'x-natively-key': key },
-        signal: AbortSignal.timeout(8000),
-      });
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({})) as any;
-        return { ok: false, error: body.error || 'request_failed', status: res.status };
-      }
-      const data = await res.json() as any;
-      const result = { ok: true, ...data };
-
-      // Cache the successful response
-      _usageCache.set(key, { data: result, ts: Date.now() });
-      return result;
-    } catch (error: any) {
-      return { ok: false, error: error.message || 'network_error' };
-    }
+    // sensi M0-T5: natively-cloud usage endpoint disabled for personal use.
+    // Returns the documented error shape so existing renderer callers degrade gracefully.
+    return { ok: false, error: 'natively_cloud_disabled' };
   });
 
   // Allow other handlers to force-invalidate the usage cache (e.g. after key change)
@@ -967,139 +1182,34 @@ export function initializeIpcHandlers(appState: AppState): void {
 
   // ── Free Trial IPC ───────────────────────────────────────────────────────────
 
-  // Start or resume a free trial. Fetches HWID, calls server, persists token locally.
+  // sensi M0-T5: trial:start stubbed — no natively-cloud trial in personal-use mode.
   safeHandle("trial:start", async () => {
-    try {
-      const { CredentialsManager } = require('./services/CredentialsManager');
-      const cm = CredentialsManager.getInstance();
-
-      // Get hardware ID for HWID-binding
-      let hwid = 'unavailable';
-      try {
-        const { LicenseManager } = require('../premium/electron/services/LicenseManager');
-        hwid = LicenseManager.getInstance().getHardwareId() || 'unavailable';
-      } catch { /* LicenseManager not available — fall back */ }
-
-      const res = await fetch('https://api.natively.software/v1/trial/start', {
-        method:  'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify({ hwid }),
-        signal:  AbortSignal.timeout(10_000),
-      });
-
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({})) as any;
-        return { ok: false, error: body.error || 'request_failed', status: res.status };
-      }
-
-      const data = await res.json() as any;
-
-      if (data.ok && data.trial_token && !data.expired) {
-        cm.setTrialToken(data.trial_token, data.expires_at, data.started_at);
-
-        // Auto-configure natively as the model + STT provider during trial
-        const prevSttProvider = cm.getSttProvider();
-        cm.setNativelyApiKey('__trial__');   // sentinel — activates natively model routing
-        const newSttProvider = cm.getSttProvider();
-        if (newSttProvider !== prevSttProvider) {
-          await appState.reconfigureSttProvider();
-        }
-        const llmHelper = appState.processingHelper?.getLLMHelper?.();
-        if (llmHelper) llmHelper.setNativelyKey('__trial__');
-      }
-
-      return { ok: true, ...data };
-    } catch (error: any) {
-      console.error('[IPC] trial:start failed:', error);
-      return { ok: false, error: error.message || 'network_error' };
-    }
+    return { ok: false, error: 'natively_cloud_disabled' };
   });
 
-  // Poll the server for live trial status (remaining time + usage counters).
+  // sensi M0-T5: trial:status stubbed — no natively-cloud trial in personal-use mode.
   safeHandle("trial:status", async () => {
-    try {
-      const { CredentialsManager } = require('./services/CredentialsManager');
-      const token = CredentialsManager.getInstance().getTrialToken();
-      if (!token) return { ok: false, error: 'no_trial_token' };
-
-      const res = await fetch('https://api.natively.software/v1/trial/status', {
-        headers: { 'x-trial-token': token },
-        signal:  AbortSignal.timeout(8_000),
-      });
-
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({})) as any;
-        return { ok: false, error: body.error || 'request_failed', status: res.status };
-      }
-
-      return await res.json();
-    } catch (error: any) {
-      return { ok: false, error: error.message || 'network_error' };
-    }
+    return { ok: false, error: 'natively_cloud_disabled' };
   });
 
-  // Return local trial state from credentials (no network call — safe for startup check).
+  // sensi M0-T5: trial:get-local always reports "no token" — trial state is gone.
   safeHandle("trial:get-local", async () => {
-    try {
-      const { CredentialsManager } = require('./services/CredentialsManager');
-      const cm    = CredentialsManager.getInstance();
-      const token = cm.getTrialToken();
-      if (!token) return { hasToken: false };
-      return {
-        hasToken:    true,
-        trialToken:  token,
-        expiresAt:   cm.getTrialExpiresAt(),
-        startedAt:   cm.getTrialStartedAt(),
-        expired:     cm.getTrialExpiresAt()
-                       ? new Date(cm.getTrialExpiresAt()!).getTime() < Date.now()
-                       : false,
-      };
-    } catch {
-      return { hasToken: false };
-    }
+    return { hasToken: false };
   });
 
-  // Record the user's post-trial choice in analytics and clean up local state.
-  safeHandle("trial:convert", async (_, choice: string) => {
-    try {
-      const { CredentialsManager } = require('./services/CredentialsManager');
-      const token = CredentialsManager.getInstance().getTrialToken();
-      if (!token) return { ok: true };  // no token to report
-
-      await fetch('https://api.natively.software/v1/trial/convert', {
-        method:  'POST',
-        headers: { 'Content-Type': 'application/json', 'x-trial-token': token },
-        body:    JSON.stringify({ choice }),
-        signal:  AbortSignal.timeout(5_000),
-      }).catch(() => {});  // fire-and-forget — don't block local cleanup on network failure
-
-      return { ok: true };
-    } catch {
-      return { ok: true };
-    }
+  // sensi M0-T5: trial:convert stubbed — no natively-cloud trial in personal-use mode.
+  safeHandle("trial:convert", async (_, _choice: string) => {
+    return { ok: true };
   });
 
-  // End trial via BYOK path: wipe Pro-ingested data, clear trial token + natively key.
+  // End trial via BYOK path: wipe Pro-ingested data and revert model / STT to open defaults.
+  // sensi M0-T5: trial-token fetch and clearTrialToken() removed — no natively-cloud trial.
   safeHandle("trial:end-byok", async () => {
     try {
       const { CredentialsManager } = require('./services/CredentialsManager');
       const cm = CredentialsManager.getInstance();
 
-      // 1. Fire-and-forget analytics (non-blocking)
-      const token = cm.getTrialToken();
-      if (token) {
-        fetch('https://api.natively.software/v1/trial/convert', {
-          method:  'POST',
-          headers: { 'Content-Type': 'application/json', 'x-trial-token': token },
-          body:    JSON.stringify({ choice: 'byok' }),
-          signal:  AbortSignal.timeout(4_000),
-        }).catch(() => {});
-      }
-
-      // 2. Clear trial token
-      cm.clearTrialToken();
-
-      // 3. Clear the trial sentinel key + revert model / STT to open defaults
+      // Clear the trial sentinel key + revert model / STT to open defaults
       cm.setNativelyApiKey('');
       const llmHelper = appState.processingHelper?.getLLMHelper?.();
       if (llmHelper) llmHelper.setNativelyKey(null);
@@ -1354,6 +1464,8 @@ export function initializeIpcHandlers(appState: AppState): void {
         hasOpenaiKey: hasKey(creds.openaiApiKey),
         hasClaudeKey: hasKey(creds.claudeApiKey),
         hasNativelyKey: hasKey(creds.nativelyApiKey),
+        // sensi M1 Step 3: MiniMax key presence flag, mirrors the other providers
+        hasMinimaxKey: hasKey(creds.minimaxApiKey),
         googleServiceAccountPath: creds.googleServiceAccountPath || null,
         sttProvider: creds.sttProvider || 'none',
         groqSttModel: creds.groqSttModel || 'whisper-large-v3-turbo',
@@ -1367,7 +1479,7 @@ export function initializeIpcHandlers(appState: AppState): void {
         ibmWatsonRegion: creds.ibmWatsonRegion || 'us-south',
         hasSonioxKey: hasKey(creds.sonioxApiKey),
         // STT key values — returned so the settings UI can pre-populate input fields.
-        // AI model keys (Gemini/Groq/OpenAI/Claude) remain boolean-only; STT keys are
+        // AI model keys (Gemini/Groq/OpenAI/Claude/MiniMax) remain boolean-only; STT keys are
         // surfaced here because users need to see which key is active when switching providers.
         sttGroqKey: creds.groqSttApiKey || '',
         sttOpenaiKey: creds.openAiSttApiKey || '',
@@ -1382,6 +1494,9 @@ export function initializeIpcHandlers(appState: AppState): void {
         groqPreferredModel: creds.groqPreferredModel || undefined,
         openaiPreferredModel: creds.openaiPreferredModel || undefined,
         claudePreferredModel: creds.claudePreferredModel || undefined,
+        // sensi M1 Step 3: MiniMax preferred model (set in Settings UI after the
+        // STANDARD_CLOUD_MODELS baseline list — see electron/shared/standardCloudModels.ts)
+        minimaxPreferredModel: creds.minimaxPreferredModel || undefined,
       };
     } catch (error: any) {
       return { hasGeminiKey: false, hasGroqKey: false, hasOpenaiKey: false, hasClaudeKey: false, hasNativelyKey: false, googleServiceAccountPath: null, sttProvider: 'none', groqSttModel: 'whisper-large-v3-turbo', hasSttGroqKey: false, hasSttOpenaiKey: false, hasDeepgramKey: false, hasElevenLabsKey: false, hasAzureKey: false, azureRegion: 'eastus', hasIbmWatsonKey: false, ibmWatsonRegion: 'us-south', hasSonioxKey: false, hasTavilyKey: false, sttGroqKey: '', sttOpenaiKey: '', sttDeepgramKey: '', sttElevenLabsKey: '', sttAzureKey: '', sttIbmKey: '', sttSonioxKey: '' };
@@ -1392,7 +1507,7 @@ export function initializeIpcHandlers(appState: AppState): void {
   // Dynamic Model Discovery Handlers
   // ==========================================
 
-  safeHandle("fetch-provider-models", async (_, provider: 'gemini' | 'groq' | 'openai' | 'claude', apiKey: string) => {
+  safeHandle("fetch-provider-models", async (_, provider: 'gemini' | 'groq' | 'openai' | 'claude' | 'minimax', apiKey: string) => {
     try {
       // Fall back to stored key if no key was explicitly provided
       let key = apiKey?.trim();
@@ -1403,10 +1518,26 @@ export function initializeIpcHandlers(appState: AppState): void {
         else if (provider === 'groq') key = cm.getGroqApiKey();
         else if (provider === 'openai') key = cm.getOpenaiApiKey();
         else if (provider === 'claude') key = cm.getClaudeApiKey();
+        // sensi M1 Step 3: MiniMax stored-key fallback
+        else if (provider === 'minimax') key = cm.getMinimaxApiKey();
       }
 
       if (!key) {
         return { success: false, error: 'No API key available. Please save a key first.' };
+      }
+
+      // sensi M1 Step 3: MiniMax uses the static baseline from
+      // electron/shared/standardCloudModels.ts rather than hitting a
+      // dynamic /v1/models endpoint. The baseline is curated and verified
+      // against MiniMax docs at the source. Dynamic discovery is M2+ work.
+      if (provider === 'minimax') {
+        const { STANDARD_CLOUD_MODELS } = require('./shared/standardCloudModels');
+        const entry = STANDARD_CLOUD_MODELS.minimax;
+        const models = entry.ids.map((id: string, i: number) => ({
+          id,
+          label: entry.names[i] || id,
+        }));
+        return { success: true, models };
       }
 
       const { fetchProviderModels } = require('./utils/modelFetcher');
@@ -1419,7 +1550,7 @@ export function initializeIpcHandlers(appState: AppState): void {
     }
   });
 
-  safeHandle("set-provider-preferred-model", async (_, provider: 'gemini' | 'groq' | 'openai' | 'claude', modelId: string) => {
+  safeHandle("set-provider-preferred-model", async (_, provider: 'gemini' | 'groq' | 'openai' | 'claude' | 'minimax', modelId: string) => {
     try {
       const { CredentialsManager } = require('./services/CredentialsManager');
       CredentialsManager.getInstance().setPreferredModel(provider, modelId);
@@ -1492,11 +1623,27 @@ export function initializeIpcHandlers(appState: AppState): void {
   safeHandle("set-deepgram-api-key", async (_, apiKey: string) => {
     try {
       const { CredentialsManager } = require('./services/CredentialsManager');
-      CredentialsManager.getInstance().setDeepgramApiKey(apiKey);
+      const { maybeAutoPromoteDeepgram } = require('./services/sttAutoPromote');
+      const cm = CredentialsManager.getInstance();
+      cm.setDeepgramApiKey(apiKey);
+
+      // sensi M3-T2: auto-promote STT provider from 'none' → 'deepgram' on
+      // first-save so the user doesn't have to open the provider dropdown
+      // separately. Only fires when sttProvider === 'none'; never overrides
+      // an explicit user choice. Mirrors the natively-key auto-promote
+      // pattern at line ~1068 (set-natively-api-key handler).
+      const promoted: boolean = maybeAutoPromoteDeepgram(cm, apiKey);
+
       BrowserWindow.getAllWindows().forEach(win => {
         if (!win.isDestroyed()) win.webContents.send('credentials-changed');
       });
-      return { success: true };
+
+      if (promoted) {
+        console.log('[IPC] set-deepgram-api-key: STT provider auto-promoted none → deepgram, reconfiguring pipeline');
+        await appState.reconfigureSttProvider();
+      }
+
+      return { success: true, promoted };
     } catch (error: any) {
       console.error("Error saving Deepgram API key:", error);
       return { success: false, error: error.message };
@@ -1788,7 +1935,7 @@ export function initializeIpcHandlers(appState: AppState): void {
     }
   });
 
-  safeHandle("test-llm-connection", async (_, provider: 'gemini' | 'groq' | 'openai' | 'claude', apiKey?: string) => {
+  safeHandle("test-llm-connection", async (_, provider: 'gemini' | 'groq' | 'openai' | 'claude' | 'minimax', apiKey?: string) => {
     console.log(`[IPC] Received test-llm-connection request for provider: ${provider}`);
     try {
       if (!apiKey || !apiKey.trim()) {
@@ -1798,6 +1945,8 @@ export function initializeIpcHandlers(appState: AppState): void {
         else if (provider === 'groq') apiKey = creds.getGroqApiKey();
         else if (provider === 'openai') apiKey = creds.getOpenaiApiKey();
         else if (provider === 'claude') apiKey = creds.getClaudeApiKey();
+        // sensi M1 Step 3: MiniMax stored-key fallback
+        else if (provider === 'minimax') apiKey = creds.getMinimaxApiKey();
       }
 
       if (!apiKey || !apiKey.trim()) {
@@ -1842,6 +1991,19 @@ export function initializeIpcHandlers(appState: AppState): void {
             'anthropic-version': '2023-06-01',
             'content-type': 'application/json'
           },
+          timeout: 15000
+        });
+      } else if (provider === 'minimax') {
+        // sensi M1 Step 3: validate MiniMax via its OpenAI-compatible endpoint.
+        // Base URL verified 2026-04-13 from
+        // https://platform.minimax.io/docs/api-reference/text-openai-api
+        // Model ID kept in sync with MINIMAX_DEFAULT_MODEL in electron/LLMHelper.ts
+        // (see also electron/shared/standardCloudModels.ts).
+        response = await axios.post('https://api.minimax.io/v1/chat/completions', {
+          model: "MiniMax-M2.7",
+          messages: [{ role: "user", content: "Hello" }]
+        }, {
+          headers: { Authorization: `Bearer ${apiKey}` },
           timeout: 15000
         });
       }
@@ -2104,10 +2266,37 @@ export function initializeIpcHandlers(appState: AppState): void {
   });
 
   // MODE 2: What Should I Say (Primary auto-answer)
+  // v2.6.2: when Online Assessment mode is enabled, route through the
+  // ASSESSMENT_SOLVE path instead — takes a fresh screenshot and returns
+  // the full solution (Approach + code + complexity). Otherwise fall
+  // through to the existing transcript-driven what-to-answer flow.
   safeHandle("generate-what-to-say", async (_, question?: string, imagePaths?: string[]) => {
     try {
       const intelligenceManager = appState.getIntelligenceManager();
-      // Question and imagePaths are now optional - IntelligenceManager infers from transcript
+      const { SettingsManager } = require('./services/SettingsManager') as typeof import('./services/SettingsManager');
+      const assessmentOn = SettingsManager.getInstance().get('onlineAssessmentModeEnabled') ?? false;
+
+      if (assessmentOn) {
+        // Fresh screenshot if caller didn't provide one. Assessment mode is
+        // explicitly about "what's on my screen right now" — we never fall
+        // back to the Live Coding ring buffer here.
+        let paths = imagePaths;
+        if (!paths || paths.length === 0) {
+          try {
+            const shot = await appState.takeScreenshot();
+            if (shot) paths = [shot];
+          } catch (e) {
+            console.error('[IPC] assessment takeScreenshot failed:', e);
+          }
+        }
+        if (!paths || paths.length === 0) {
+          return { answer: null, question: 'assessment', error: 'Could not capture a screenshot for assessment mode.' };
+        }
+        const answer = await intelligenceManager.runAssessmentSolve(paths);
+        return { answer, question: 'assessment solve' };
+      }
+
+      // Default: transcript-based what-to-answer.
       const answer = await intelligenceManager.runWhatShouldISay(question, 0.8, imagePaths);
       return { answer, question: question || 'inferred from context' };
     } catch (error: any) {
@@ -2325,7 +2514,11 @@ export function initializeIpcHandlers(appState: AppState): void {
       return { success: true };
     } catch (error: any) {
       console.error("Calendar auth error:", error);
-      return { success: false, error: error.message };
+      return {
+        success: false,
+        error: error?.message ?? 'Unknown error',
+        code: (error && error.code) || 'UNKNOWN',
+      };
     }
   });
 
@@ -2340,6 +2533,55 @@ export function initializeIpcHandlers(appState: AppState): void {
     return CalendarManager.getInstance().getConnectionStatus();
   });
 
+  // v2.5.4: Google OAuth credential management (Settings → Calendar)
+  safeHandle("get-google-oauth-status", async () => {
+    try {
+      const { CredentialsManager } = require('./services/CredentialsManager');
+      const mgr = CredentialsManager.getInstance();
+      const clientId = mgr.getGoogleOauthClientId?.() ?? null;
+      const hasSecret = !!mgr.getGoogleOauthClientSecret?.();
+      // Only return a masked Client ID — never the secret — to the renderer.
+      const maskedId = clientId
+        ? `${clientId.slice(0, 6)}…${clientId.slice(-12)}`
+        : null;
+      return { configured: !!clientId && hasSecret, maskedClientId: maskedId };
+    } catch (error: any) {
+      return { configured: false, maskedClientId: null };
+    }
+  });
+
+  safeHandle("set-google-oauth-credentials", async (_, payload: { clientId?: string; clientSecret?: string }) => {
+    try {
+      const clientId = (payload?.clientId ?? '').trim();
+      const clientSecret = (payload?.clientSecret ?? '').trim();
+      if (!clientId || !clientSecret) {
+        return { success: false, error: 'Both Client ID and Client Secret are required.' };
+      }
+      if (!clientId.includes('.apps.googleusercontent.com')) {
+        return { success: false, error: 'Client ID doesn\'t look right — it should end in .apps.googleusercontent.com' };
+      }
+      const { CredentialsManager } = require('./services/CredentialsManager');
+      CredentialsManager.getInstance().setGoogleOauthCredentials(clientId, clientSecret);
+      return { success: true };
+    } catch (error: any) {
+      return { success: false, error: error?.message ?? 'Failed to save credentials' };
+    }
+  });
+
+  safeHandle("clear-google-oauth-credentials", async () => {
+    try {
+      const { CredentialsManager } = require('./services/CredentialsManager');
+      CredentialsManager.getInstance().clearGoogleOauthCredentials();
+      // If the calendar was connected with these creds, disconnect too —
+      // the tokens are now unusable without the client secret.
+      const { CalendarManager } = require('./services/CalendarManager');
+      await CalendarManager.getInstance().disconnect();
+      return { success: true };
+    } catch (error: any) {
+      return { success: false, error: error?.message ?? 'Failed to clear credentials' };
+    }
+  });
+
   safeHandle("get-upcoming-events", async () => {
     const { CalendarManager } = require('./services/CalendarManager');
     return CalendarManager.getInstance().getUpcomingEvents();
@@ -2350,6 +2592,135 @@ export function initializeIpcHandlers(appState: AppState): void {
     await CalendarManager.getInstance().refreshState();
     return { success: true };
   });
+
+  // ── Pre-meeting alert user decisions ────────────────────────────
+  // Called from the in-app PreMeetingPrompt modal when the user clicks
+  // "Yes, bring sensi" or "Not this one".
+  safeHandle("pre-meeting-alert-accept", async (_, event: { id: string; title: string }) => {
+    try {
+      if (!event || !event.id) return { success: false, error: 'invalid event' };
+      await appState.startMeeting({
+        title: event.title,
+        calendarEventId: event.id,
+        source: 'calendar'
+      });
+      return { success: true };
+    } catch (error: any) {
+      return { success: false, error: error?.message ?? 'failed to start meeting' };
+    }
+  });
+
+  safeHandle("pre-meeting-alert-dismiss", async (_, event: { id: string }) => {
+    try {
+      if (!event || !event.id) return { success: false, error: 'invalid event' };
+      const { CalendarManager } = require('./services/CalendarManager');
+      CalendarManager.getInstance().dismissEvent(event.id);
+      return { success: true };
+    } catch (error: any) {
+      return { success: false, error: error?.message ?? 'failed to dismiss' };
+    }
+  });
+
+  safeHandle("set-pre-meeting-alerts-enabled", async (_, enabled: boolean) => {
+    try {
+      const { SettingsManager } = require('./services/SettingsManager') as typeof import('./services/SettingsManager');
+      SettingsManager.getInstance().set('preMeetingAlertsEnabled', !!enabled);
+      return { success: true };
+    } catch (error: any) {
+      return { success: false, error: error?.message ?? 'failed to persist' };
+    }
+  });
+
+  safeHandle("get-pre-meeting-alerts-enabled", async () => {
+    try {
+      const { SettingsManager } = require('./services/SettingsManager') as typeof import('./services/SettingsManager');
+      return SettingsManager.getInstance().get('preMeetingAlertsEnabled') ?? true;
+    } catch (error: any) {
+      return true;
+    }
+  });
+
+  // ── Meeting auto-detect (v2.5.1) ────────────────────────────────
+  safeHandle("set-meeting-auto-detect-enabled", async (_, enabled: boolean) => {
+    try {
+      const { SettingsManager } = require('./services/SettingsManager') as typeof import('./services/SettingsManager');
+      SettingsManager.getInstance().set('meetingAutoDetectEnabled', !!enabled);
+      const { MeetingDetector } = require('./services/MeetingDetector') as typeof import('./services/MeetingDetector');
+      MeetingDetector.getInstance().setEnabled(!!enabled);
+      return { success: true };
+    } catch (error: any) {
+      return { success: false, error: error?.message ?? 'failed to persist' };
+    }
+  });
+
+  safeHandle("get-meeting-auto-detect-enabled", async () => {
+    try {
+      const { SettingsManager } = require('./services/SettingsManager') as typeof import('./services/SettingsManager');
+      return SettingsManager.getInstance().get('meetingAutoDetectEnabled') ?? true;
+    } catch (error: any) {
+      return true;
+    }
+  });
+
+  // ── M6-A: Live Coding mode (v2.6.0) ─────────────────────────────
+  safeHandle("set-live-coding-mode-enabled", async (_, enabled: boolean) => {
+    try {
+      const { SettingsManager } = require('./services/SettingsManager') as typeof import('./services/SettingsManager');
+      SettingsManager.getInstance().set('liveCodingModeEnabled', !!enabled);
+      const { LiveScreenCapture } = require('./services/LiveScreenCapture') as typeof import('./services/LiveScreenCapture');
+      LiveScreenCapture.getInstance().setEnabled(!!enabled);
+      return { success: true };
+    } catch (error: any) {
+      return { success: false, error: error?.message ?? 'failed to persist' };
+    }
+  });
+
+  safeHandle("get-live-coding-mode-enabled", async () => {
+    try {
+      const { SettingsManager } = require('./services/SettingsManager') as typeof import('./services/SettingsManager');
+      return SettingsManager.getInstance().get('liveCodingModeEnabled') ?? false;
+    } catch (error: any) {
+      return false;
+    }
+  });
+
+  // ── v2.6.2: Online Assessment mode ──────────────────────────────
+  // Solves the visible coding problem end-to-end with a fresh screenshot.
+  // Independent of Live Coding: no continuous capture, no ring buffer.
+  safeHandle("set-online-assessment-mode-enabled", async (_, enabled: boolean) => {
+    try {
+      const { SettingsManager } = require('./services/SettingsManager') as typeof import('./services/SettingsManager');
+      SettingsManager.getInstance().set('onlineAssessmentModeEnabled', !!enabled);
+      // Broadcast so other windows (overlay popup, launcher chip) sync.
+      const helper = appState.getWindowHelper();
+      helper.getLauncherWindow()?.webContents.send('online-assessment-mode-changed', !!enabled);
+      helper.getOverlayWindow()?.webContents.send('online-assessment-mode-changed', !!enabled);
+      return { success: true };
+    } catch (error: any) {
+      return { success: false, error: error?.message ?? 'failed to persist' };
+    }
+  });
+
+  safeHandle("get-online-assessment-mode-enabled", async () => {
+    try {
+      const { SettingsManager } = require('./services/SettingsManager') as typeof import('./services/SettingsManager');
+      return SettingsManager.getInstance().get('onlineAssessmentModeEnabled') ?? false;
+    } catch (error: any) {
+      return false;
+    }
+  });
+
+  safeHandle("get-live-screen-capture-running", async () => {
+    try {
+      const { LiveScreenCapture } = require('./services/LiveScreenCapture') as typeof import('./services/LiveScreenCapture');
+      return LiveScreenCapture.getInstance().isRunning();
+    } catch (error: any) {
+      return false;
+    }
+  });
+  // M6-A A3 (keybinds): existing `keybinds:get-all`/`keybinds:set`/`keybinds:reset`
+  // channels + the renderer's KeyRecorder UI already cover this. No additional
+  // handlers needed. See electron/services/KeybindManager.ts and src/hooks/useShortcuts.ts.
 
   // ==========================================
   // Follow-up Email Handlers
@@ -2782,10 +3153,8 @@ export function initializeIpcHandlers(appState: AppState): void {
         const nativelyKey = cm.getNativelyApiKey();
         if (nativelyKey) {
           const { NativelySearchProvider } = require('../premium/electron/knowledge/NativelySearchProvider');
-          // Pass the real trial token when key is the __trial__ sentinel so the
-          // server can authenticate via x-trial-token instead of the invalid key.
-          const trialToken = nativelyKey === '__trial__' ? cm.getTrialToken() : undefined;
-          engine.setSearchProvider(new NativelySearchProvider(nativelyKey, trialToken ?? undefined));
+          // sensi M0-T5: trial-token path removed; __trial__ sentinel no longer resolves to a token.
+          engine.setSearchProvider(new NativelySearchProvider(nativelyKey, undefined));
           console.log('[IPC] Company research: using Natively API search (no Tavily key configured)');
         }
       }
@@ -2886,6 +3255,386 @@ export function initializeIpcHandlers(appState: AppState): void {
   });
 
   // ==========================================
+  // sensi M8 / PASS B (v2.13.0): sensi-cloud auth
+  // Thin IPC wrapper around AuthManager — the singleton does the real
+  // work (fetch / refresh / openExternal). All handlers are envelope-
+  // shaped ({success, error?}) so the renderer's try/catch surface is
+  // consistent with the rest of the IPC API.
+  // ==========================================
+
+  safeHandle("auth:sign-in", async () => {
+    try {
+      const { AuthManager } = require('./services/AuthManager') as typeof import('./services/AuthManager');
+      await AuthManager.getInstance().startSignIn();
+      return { success: true };
+    } catch (error: any) {
+      console.error('[IPC] auth:sign-in error:', error);
+      return { success: false, error: error?.message ?? 'Failed to start sign-in.' };
+    }
+  });
+
+  safeHandle("auth:sign-out", async () => {
+    try {
+      const { AuthManager } = require('./services/AuthManager') as typeof import('./services/AuthManager');
+      await AuthManager.getInstance().signOut();
+      return { success: true };
+    } catch (error: any) {
+      console.error('[IPC] auth:sign-out error:', error);
+      return { success: false, error: error?.message ?? 'Failed to sign out.' };
+    }
+  });
+
+  safeHandle("auth:get-state", async () => {
+    try {
+      const { AuthManager } = require('./services/AuthManager') as typeof import('./services/AuthManager');
+      return { success: true, state: AuthManager.getInstance().getAuthState() };
+    } catch (error: any) {
+      return { success: false, error: error?.message ?? 'Failed to read auth state.' };
+    }
+  });
+
+  safeHandle("auth:refresh-me", async () => {
+    try {
+      const { AuthManager } = require('./services/AuthManager') as typeof import('./services/AuthManager');
+      const me = await AuthManager.getInstance().refreshMe();
+      return { success: true, me };
+    } catch (error: any) {
+      return { success: false, error: error?.message ?? 'Failed to refresh /me.' };
+    }
+  });
+
+  safeHandle("auth:open-checkout", async () => {
+    try {
+      const { AuthManager } = require('./services/AuthManager') as typeof import('./services/AuthManager');
+      await AuthManager.getInstance().openCheckout();
+      return { success: true };
+    } catch (error: any) {
+      console.error('[IPC] auth:open-checkout error:', error);
+      return { success: false, error: error?.message ?? 'Failed to open checkout.' };
+    }
+  });
+
+  safeHandle("auth:open-portal", async () => {
+    try {
+      const { AuthManager } = require('./services/AuthManager') as typeof import('./services/AuthManager');
+      await AuthManager.getInstance().openBillingPortal();
+      return { success: true };
+    } catch (error: any) {
+      console.error('[IPC] auth:open-portal error:', error);
+      return { success: false, error: error?.message ?? 'Failed to open billing portal.' };
+    }
+  });
+
+  // ==========================================
+  // MEMORY-01 (v2.17.0) — cross-meeting memory engine controls
+  // ==========================================
+
+  safeHandle("memory:get-enabled", async () => {
+    const { SettingsManager } = require('./services/SettingsManager') as typeof import('./services/SettingsManager');
+    const enabled = SettingsManager.getInstance().get('memoryEngineEnabled');
+    return { enabled: enabled !== false };
+  });
+
+  safeHandle("memory:set-enabled", async (_, enabled: boolean) => {
+    const { SettingsManager } = require('./services/SettingsManager') as typeof import('./services/SettingsManager');
+    SettingsManager.getInstance().set('memoryEngineEnabled', !!enabled);
+    return { success: true };
+  });
+
+  safeHandle("memory:get-queue-size", async () => {
+    try {
+      const { MemoryIngestClient } = require('./services/MemoryIngestClient') as typeof import('./services/MemoryIngestClient');
+      return { pending: MemoryIngestClient.getInstance().pendingCount() };
+    } catch {
+      return { pending: 0 };
+    }
+  });
+
+  safeHandle("memory:purge", async () => {
+    try {
+      const { AuthManager } = require('./services/AuthManager') as typeof import('./services/AuthManager');
+      const access = await AuthManager.getInstance().getFreshAccessToken();
+      if (!access) return { success: false, error: 'Sign in first.' };
+      const res = await fetch('https://api.sensi.cloudfrontiers.co.uk/memory/purge', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${access}` },
+        body: '{}',
+      });
+      if (!res.ok) {
+        return { success: false, error: `Purge failed (${res.status}).` };
+      }
+      const json = (await res.json()) as { deleted?: number };
+      return { success: true, deleted: json.deleted ?? 0 };
+    } catch (error: any) {
+      return { success: false, error: error?.message ?? 'Purge failed.' };
+    }
+  });
+
+  // ==========================================
+  // sensi M7 / RESEARCH-01: Standalone Research
+  // Direct Tavily call -> synthesize via LLMHelper with COMPANY_RESEARCH_PROMPT.
+  // Bypasses the zombie profile:research-company path (which requires the
+  // premium KnowledgeOrchestrator/CompanyResearchEngine subtree) so users can
+  // run company/topic research without setting up a persona first.
+  // ==========================================
+
+  safeHandle("research:run", async (_, query: string, scope: 'company' | 'general' = 'general') => {
+    try {
+      const trimmed = (query ?? '').trim();
+      if (!trimmed) {
+        return { success: false, error: 'Please enter a company, role, or topic to research.' };
+      }
+      if (trimmed.length > 300) {
+        return { success: false, error: 'Query too long — keep it under 300 characters.' };
+      }
+
+      const { CredentialsManager } = require('./services/CredentialsManager');
+      const tavilyApiKey = CredentialsManager.getInstance().getTavilyApiKey();
+
+      // v2.16.1: signed-in users with no BYOK Tavily key get search
+      // through the Sensi AI gateway. Backend /search/tavily enforces
+      // the research cap (shared counter with /ai/chat kind=research).
+      let rawResults: Array<{ title?: string; url?: string; content?: string; publishedDate?: string }> = [];
+
+      if (tavilyApiKey) {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const { tavily } = require('@tavily/core');
+        const client = tavily({ apiKey: tavilyApiKey });
+        const searchOpts = scope === 'company'
+          ? { searchDepth: 'advanced' as const, maxResults: 8, topic: 'general' as const, includeAnswer: false as const, timeRange: 'year' as const }
+          : { searchDepth: 'basic' as const, maxResults: 6, topic: 'general' as const, includeAnswer: false as const };
+        const response = await client.search(trimmed, searchOpts);
+        rawResults = Array.isArray(response?.results) ? response.results : [];
+      } else {
+        // Managed path via sensi-cloud.
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const { AuthManager } = require('./services/AuthManager') as typeof import('./services/AuthManager');
+        if (!AuthManager.getInstance().getAuthState().signedIn) {
+          return { success: false, error: 'Sign in to use Sensi AI research, or add a Tavily key in Settings → AI Providers.' };
+        }
+        const access = await AuthManager.getInstance().getFreshAccessToken();
+        if (!access) {
+          return { success: false, error: 'Sign in again to refresh your session.' };
+        }
+        const body = scope === 'company'
+          ? { query: trimmed, search_depth: 'advanced', max_results: 8, days: 365 }
+          : { query: trimmed, search_depth: 'basic', max_results: 6 };
+        const res = await fetch('https://api.sensi.cloudfrontiers.co.uk/search/tavily', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', authorization: `Bearer ${access}` },
+          body: JSON.stringify(body),
+        });
+        if (!res.ok) {
+          let errBody: any = null;
+          try { errBody = await res.json(); } catch { /* non-json */ }
+          if (res.status === 429 && errBody?.error?.code === 'daily_cap') {
+            const used = errBody.error.used ?? 0;
+            const cap = errBody.error.cap ?? 0;
+            return { success: false, error: `Daily research cap reached (${used}/${cap}). Upgrade to Pro for unlimited.` };
+          }
+          return { success: false, error: errBody?.error?.message ?? `Sensi AI research is busy (${res.status}). Try again.` };
+        }
+        const data = await res.json() as { results?: any[] };
+        rawResults = Array.isArray(data?.results) ? data.results : [];
+      }
+
+      if (rawResults.length === 0) {
+        return { success: false, error: 'No results found. Try a different query.' };
+      }
+
+      // Strip to essentials the prompt asked for; cap content length to stay
+      // under sensible token budgets (~200 tokens/result * 8 results).
+      const results = rawResults.slice(0, 8).map((r: any) => ({
+        title: String(r?.title ?? '').slice(0, 200),
+        url: String(r?.url ?? ''),
+        content: String(r?.content ?? '').slice(0, 1200),
+        publishedDate: r?.publishedDate ?? undefined,
+      }));
+
+      const { COMPANY_RESEARCH_PROMPT } = require('./llm/prompts');
+      const userMessage = `${COMPANY_RESEARCH_PROMPT}\n\nQUERY: ${trimmed}\nSCOPE: ${scope}\n\nRESULTS:\n${JSON.stringify(results, null, 2)}`;
+
+      const llmHelper = appState.processingHelper?.getLLMHelper?.();
+      if (!llmHelper) {
+        return { success: false, error: 'LLM not ready. Configure a provider in AI Providers first.' };
+      }
+
+      const brief = await llmHelper.chatWithGemini(userMessage, undefined, undefined, true);
+      if (!brief || brief.trim().length === 0) {
+        return { success: false, error: 'Model returned an empty brief. Try again.' };
+      }
+
+      return {
+        success: true,
+        brief,
+        query: trimmed,
+        scope,
+        sources: results.map((r: any) => ({ title: r.title, url: r.url })),
+      };
+    } catch (error: any) {
+      console.error('[IPC] research:run error:', error);
+      const msg = typeof error?.message === 'string' ? error.message : 'Research failed.';
+      // Surface Tavily-specific auth errors with a clearer hint.
+      if (msg.toLowerCase().includes('401') || msg.toLowerCase().includes('unauthorized')) {
+        return { success: false, error: 'Tavily rejected the API key. Re-check it in Settings → AI Providers.' };
+      }
+      return { success: false, error: msg };
+    }
+  });
+
+  // ==========================================
+  // sensi M7 / MOTION-01: Video / GIF clip capture + analysis
+  // Captures a bounded sequence of screen frames then feeds them into the
+  // current LLM with a dedicated prompt — supports solo video assessments
+  // and clip-vs-clip comparisons (GIF comparison, animation QA, UX study).
+  // Uses the same screenshot path as Live Coding mode.
+  // ==========================================
+
+  safeHandle("motion:start", async () => {
+    try {
+      const { MotionCaptureManager } = require('./services/MotionCaptureManager');
+      const mgr = MotionCaptureManager.getInstance();
+      const res = mgr.start();
+      return res;
+    } catch (error: any) {
+      console.error('[IPC] motion:start error:', error);
+      return { ok: false, error: error?.message ?? 'Failed to start motion capture.' };
+    }
+  });
+
+  safeHandle("motion:stop", async () => {
+    try {
+      const { MotionCaptureManager } = require('./services/MotionCaptureManager');
+      const mgr = MotionCaptureManager.getInstance();
+      const { frames, durationMs } = mgr.stop();
+      return { ok: true, frames, durationMs };
+    } catch (error: any) {
+      console.error('[IPC] motion:stop error:', error);
+      return { ok: false, error: error?.message ?? 'Failed to stop motion capture.' };
+    }
+  });
+
+  safeHandle("motion:status", async () => {
+    try {
+      const { MotionCaptureManager } = require('./services/MotionCaptureManager');
+      const mgr = MotionCaptureManager.getInstance();
+      return {
+        recording: mgr.isRecording(),
+        frameCount: mgr.getFrameCount(),
+        elapsedMs: mgr.getElapsedMs(),
+        maxFrames: mgr.getMaxFrames(),
+        intervalMs: mgr.getFrameIntervalMs(),
+      };
+    } catch (error: any) {
+      return { recording: false, frameCount: 0, elapsedMs: 0, maxFrames: 0, intervalMs: 1500 };
+    }
+  });
+
+  safeHandle("motion:summarize", async (_, framePaths: string[]) => {
+    try {
+      if (!Array.isArray(framePaths) || framePaths.length === 0) {
+        return { success: false, error: 'No frames to summarize.' };
+      }
+      const existing = framePaths.filter(p => {
+        try { return typeof p === 'string' && fs.existsSync(p); } catch { return false; }
+      });
+      if (existing.length === 0) {
+        return { success: false, error: 'Frames no longer exist on disk.' };
+      }
+
+      const llmHelper = appState.processingHelper?.getLLMHelper?.();
+      if (!llmHelper) {
+        return { success: false, error: 'LLM not ready. Configure a provider in AI Providers first.' };
+      }
+
+      const { VIDEO_SUMMARY_PROMPT } = require('./llm/prompts');
+      const frameIntervalSec = 1.5;
+      const approxDurationSec = ((existing.length - 1) * frameIntervalSec).toFixed(1);
+      const userMessage = `${existing.length} frames attached in chronological order (t=0 to t=${approxDurationSec}s, ~${frameIntervalSec}s per frame). Produce the video summary using the headings defined in your instructions.`;
+
+      // Stream the brief so long summaries don't stall; but collect into a
+      // single return string since the IPC caller wants the final markdown.
+      let brief = '';
+      const stream = llmHelper.streamChat(
+        userMessage,
+        existing,
+        undefined,
+        VIDEO_SUMMARY_PROMPT,
+        true
+      );
+      for await (const token of stream) {
+        brief += token;
+      }
+
+      if (!brief || brief.trim().length === 0) {
+        return { success: false, error: 'Model returned an empty summary. Try again.' };
+      }
+      return { success: true, brief, frameCount: existing.length };
+    } catch (error: any) {
+      console.error('[IPC] motion:summarize error:', error);
+      return { success: false, error: error?.message ?? 'Video summary failed.' };
+    }
+  });
+
+  safeHandle("motion:compare", async (_, clipAPaths: string[], clipBPaths: string[]) => {
+    try {
+      if (!Array.isArray(clipAPaths) || !Array.isArray(clipBPaths)) {
+        return { success: false, error: 'Both clips are required for comparison.' };
+      }
+      const aFrames = clipAPaths.filter(p => {
+        try { return typeof p === 'string' && fs.existsSync(p); } catch { return false; }
+      });
+      const bFrames = clipBPaths.filter(p => {
+        try { return typeof p === 'string' && fs.existsSync(p); } catch { return false; }
+      });
+      if (aFrames.length === 0 || bFrames.length === 0) {
+        return { success: false, error: 'One or both clips have no frames on disk.' };
+      }
+
+      const llmHelper = appState.processingHelper?.getLLMHelper?.();
+      if (!llmHelper) {
+        return { success: false, error: 'LLM not ready. Configure a provider in AI Providers first.' };
+      }
+
+      const { MOTION_COMPARE_PROMPT } = require('./llm/prompts');
+      const combined = [...aFrames, ...bFrames];
+      const splitPoint = aFrames.length;
+      const userMessage = `Clip A: frames 1-${splitPoint}. Clip B: frames ${splitPoint + 1}-${combined.length}. Compare using the headings defined in your instructions.`;
+
+      let brief = '';
+      const stream = llmHelper.streamChat(
+        userMessage,
+        combined,
+        undefined,
+        MOTION_COMPARE_PROMPT,
+        true
+      );
+      for await (const token of stream) {
+        brief += token;
+      }
+
+      if (!brief || brief.trim().length === 0) {
+        return { success: false, error: 'Model returned an empty comparison. Try again.' };
+      }
+      return { success: true, brief, clipAFrames: aFrames.length, clipBFrames: bFrames.length };
+    } catch (error: any) {
+      console.error('[IPC] motion:compare error:', error);
+      return { success: false, error: error?.message ?? 'Clip comparison failed.' };
+    }
+  });
+
+  safeHandle("motion:discard", async (_, framePaths: string[]) => {
+    try {
+      if (!Array.isArray(framePaths)) return { success: true };
+      const { MotionCaptureManager } = require('./services/MotionCaptureManager');
+      MotionCaptureManager.getInstance().discardFrames(framePaths);
+      return { success: true };
+    } catch (error: any) {
+      return { success: false, error: error?.message ?? 'Failed to discard frames.' };
+    }
+  });
+
+  // ==========================================
   // Overlay Opacity (Stealth Mode)
   // ==========================================
 
@@ -2899,6 +3648,484 @@ export function initializeIpcHandlers(appState: AppState): void {
       }
     });
     return;
+  });
+
+  // ── Knowledge base (M4-T8) ───────────────────────────────────
+  //
+  // Eight narrow, typed channels that map 1:1 onto the public methods
+  // of the M4-T6 KnowledgeOrchestrator (plus one bounded preview
+  // channel — see D021 for why getDocumentText is not exposed raw).
+  //
+  // Every handler delegates to a pure helper in
+  // electron/knowledge/knowledgeIpcHelpers.ts that handles input
+  // validation, orchestrator delegation, and typed-error translation.
+  // The safeHandle bodies here are thin wrappers — all logic and
+  // tests live in the helper module.
+  //
+  // Defensive getter: if the DatabaseManager isn't initialized yet
+  // (very early startup, tests without full main-process boot), the
+  // helpers will receive a KnowledgeOrchestratorForIpc that throws on
+  // every call — which the helper translates to an `internal` error.
+  // Live-assist is independent of these IPC channels, so their failure
+  // does not affect the rolling-context prompt path (which has its
+  // own defensive wiring per M4-T7 + D021).
+  const getKnowledgeOrch = (): import('./knowledge/knowledgeIpcHelpers').KnowledgeOrchestratorForIpc => {
+    return DatabaseManager.getInstance().getKnowledgeOrchestrator();
+  };
+
+  safeHandle("knowledge-ingest-document", async (_, filePath: unknown) => {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { handleIngestDocument } = require('./knowledge/knowledgeIpcHelpers') as typeof import('./knowledge/knowledgeIpcHelpers');
+    return await handleIngestDocument(getKnowledgeOrch(), filePath);
+  });
+
+  safeHandle("knowledge-list-documents", async () => {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { handleListDocuments } = require('./knowledge/knowledgeIpcHelpers') as typeof import('./knowledge/knowledgeIpcHelpers');
+    return handleListDocuments(getKnowledgeOrch());
+  });
+
+  safeHandle("knowledge-delete-document", async (_, id: unknown) => {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { handleDeleteDocument } = require('./knowledge/knowledgeIpcHelpers') as typeof import('./knowledge/knowledgeIpcHelpers');
+    return handleDeleteDocument(getKnowledgeOrch(), id);
+  });
+
+  safeHandle("knowledge-pin-document", async (_, id: unknown) => {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { handlePinDocument } = require('./knowledge/knowledgeIpcHelpers') as typeof import('./knowledge/knowledgeIpcHelpers');
+    return handlePinDocument(getKnowledgeOrch(), id);
+  });
+
+  safeHandle("knowledge-unpin-document", async (_, id: unknown) => {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { handleUnpinDocument } = require('./knowledge/knowledgeIpcHelpers') as typeof import('./knowledge/knowledgeIpcHelpers');
+    return handleUnpinDocument(getKnowledgeOrch(), id);
+  });
+
+  safeHandle("knowledge-list-pinned", async () => {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { handleListPinned } = require('./knowledge/knowledgeIpcHelpers') as typeof import('./knowledge/knowledgeIpcHelpers');
+    return handleListPinned(getKnowledgeOrch());
+  });
+
+  safeHandle("knowledge-query", async (_, payload: unknown) => {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { handleQueryKnowledge } = require('./knowledge/knowledgeIpcHelpers') as typeof import('./knowledge/knowledgeIpcHelpers');
+    return await handleQueryKnowledge(getKnowledgeOrch(), payload);
+  });
+
+  // ==========================================
+  // sensi M7 / KNOWLEDGE-02: per-meeting document attachment
+  // Attach / detach / list docs by calendar event id, plus an
+  // auto-suggest that embeds the event's title+description and scores
+  // unattached docs by cosine distance. Errors surface as
+  // `{ success: false, error }` — same envelope as the research/motion
+  // IPC paths so the renderer's try/catch shape stays consistent.
+  // ==========================================
+
+  safeHandle("knowledge:attach-to-event", async (_, docId: unknown, eventId: unknown) => {
+    try {
+      if (typeof docId !== 'string' || !docId) return { success: false, error: 'docId required' };
+      if (typeof eventId !== 'string' || !eventId) return { success: false, error: 'eventId required' };
+      const orch = getKnowledgeOrch();
+      if (typeof orch.attachDocumentToEvent !== 'function') {
+        return { success: false, error: 'Knowledge engine does not support per-meeting attachments.' };
+      }
+      orch.attachDocumentToEvent(docId, eventId);
+      try {
+        const { PrepOrchestrator } = require('./services/PrepOrchestrator');
+        PrepOrchestrator.getInstance().invalidate(eventId);
+      } catch { /* silent */ }
+      return { success: true };
+    } catch (error: any) {
+      console.error('[IPC] knowledge:attach-to-event error:', error);
+      return { success: false, error: error?.message ?? 'Failed to attach document to event.' };
+    }
+  });
+
+  safeHandle("knowledge:detach-from-event", async (_, docId: unknown, eventId: unknown) => {
+    try {
+      if (typeof docId !== 'string' || !docId) return { success: false, error: 'docId required' };
+      if (typeof eventId !== 'string' || !eventId) return { success: false, error: 'eventId required' };
+      const orch = getKnowledgeOrch();
+      if (typeof orch.detachDocumentFromEvent !== 'function') {
+        return { success: false, error: 'Knowledge engine does not support per-meeting attachments.' };
+      }
+      orch.detachDocumentFromEvent(docId, eventId);
+      try {
+        const { PrepOrchestrator } = require('./services/PrepOrchestrator');
+        PrepOrchestrator.getInstance().invalidate(eventId);
+      } catch { /* silent */ }
+      return { success: true };
+    } catch (error: any) {
+      console.error('[IPC] knowledge:detach-from-event error:', error);
+      return { success: false, error: error?.message ?? 'Failed to detach document from event.' };
+    }
+  });
+
+  safeHandle("knowledge:list-for-event", async (_, eventId: unknown) => {
+    try {
+      if (typeof eventId !== 'string' || !eventId) return { success: false, error: 'eventId required' };
+      const orch = getKnowledgeOrch();
+      if (typeof orch.listDocumentsForEvent !== 'function') {
+        return { success: true, documents: [] };
+      }
+      const documents = orch.listDocumentsForEvent(eventId);
+      return { success: true, documents };
+    } catch (error: any) {
+      console.error('[IPC] knowledge:list-for-event error:', error);
+      return { success: false, error: error?.message ?? 'Failed to list attached documents.' };
+    }
+  });
+
+  safeHandle("knowledge:list-events-for-document", async (_, docId: unknown) => {
+    try {
+      if (typeof docId !== 'string' || !docId) return { success: false, error: 'docId required' };
+      const orch = getKnowledgeOrch();
+      if (typeof orch.listEventsForDocument !== 'function') {
+        return { success: true, eventIds: [] };
+      }
+      const eventIds = orch.listEventsForDocument(docId);
+      return { success: true, eventIds };
+    } catch (error: any) {
+      console.error('[IPC] knowledge:list-events-for-document error:', error);
+      return { success: false, error: error?.message ?? 'Failed to list events for document.' };
+    }
+  });
+
+  safeHandle("knowledge:suggest-for-event", async (_, eventId: unknown, searchText: unknown, topK: unknown) => {
+    try {
+      if (typeof eventId !== 'string' || !eventId) return { success: false, error: 'eventId required' };
+      const blob = typeof searchText === 'string' ? searchText : '';
+      const k = typeof topK === 'number' && topK > 0 ? Math.min(Math.floor(topK), 10) : 3;
+      const orch = getKnowledgeOrch();
+      if (typeof orch.suggestDocumentsForEvent !== 'function') {
+        return { success: true, suggestions: [] };
+      }
+      const suggestions = await orch.suggestDocumentsForEvent(eventId, blob, k);
+      return { success: true, suggestions };
+    } catch (error: any) {
+      console.error('[IPC] knowledge:suggest-for-event error:', error);
+      return { success: false, error: error?.message ?? 'Failed to suggest documents for event.' };
+    }
+  });
+
+  // ==========================================
+  // sensi M7 / PERSONA-01 (v2.10.0): lightweight resume persona
+  // Uploads a resume, extracts structured fields once via the active LLM,
+  // stores the JSON in user_persona, and makes the latest row available
+  // for injection into every WhatToAnswerLLM call. Separate from the
+  // (hidden, zombie) Profile Intelligence `profile:*` handlers.
+  // ==========================================
+
+  safeHandle("persona:pick-file", async () => {
+    try {
+      // Cast to any to bypass the older overload that returns string[].
+      const result: any = await dialog.showOpenDialog({
+        properties: ['openFile'],
+        filters: [
+          { name: 'Resume', extensions: ['pdf', 'docx', 'md', 'markdown', 'txt'] },
+        ],
+      });
+      if (result?.canceled || !result?.filePaths || result.filePaths.length === 0) {
+        return { cancelled: true };
+      }
+      return { cancelled: false, filePath: result.filePaths[0] };
+    } catch (error: any) {
+      return { cancelled: false, error: error?.message ?? 'Failed to open file dialog.' };
+    }
+  });
+
+  safeHandle("persona:upload-resume", async (_, filePath: unknown) => {
+    try {
+      if (typeof filePath !== 'string' || !filePath.trim()) {
+        return { success: false, error: 'filePath is required' };
+      }
+      const { PersonaManager } = require('./persona/PersonaManager') as typeof import('./persona/PersonaManager');
+      const summary = await PersonaManager.getInstance().uploadResume(filePath);
+      return { success: true, summary };
+    } catch (error: any) {
+      console.error('[IPC] persona:upload-resume error:', error);
+      return { success: false, error: error?.message ?? 'Failed to process resume.' };
+    }
+  });
+
+  safeHandle("persona:get-summary", async () => {
+    try {
+      const { PersonaManager } = require('./persona/PersonaManager') as typeof import('./persona/PersonaManager');
+      const summary = PersonaManager.getInstance().getLatest('resume');
+      return { success: true, summary };
+    } catch (error: any) {
+      return { success: false, error: error?.message ?? 'Failed to read persona.' };
+    }
+  });
+
+  safeHandle("persona:clear", async () => {
+    try {
+      const { PersonaManager } = require('./persona/PersonaManager') as typeof import('./persona/PersonaManager');
+      PersonaManager.getInstance().clear('resume');
+      return { success: true };
+    } catch (error: any) {
+      return { success: false, error: error?.message ?? 'Failed to clear persona.' };
+    }
+  });
+
+  // ==========================================
+  // sensi M7 / PERSONA-02 (v2.11.0): per-meeting JD
+  // Binds a JD to a calendar event via user_persona.event_id. When
+  // "What to answer?" fires during that meeting, the persona hook
+  // returns the combined persona×JD block (gaps + talking points).
+  // ==========================================
+
+  safeHandle("persona:pick-jd-file", async () => {
+    try {
+      const result: any = await dialog.showOpenDialog({
+        properties: ['openFile'],
+        filters: [
+          { name: 'Job description', extensions: ['pdf', 'docx', 'md', 'markdown', 'txt'] },
+        ],
+      });
+      if (result?.canceled || !result?.filePaths || result.filePaths.length === 0) {
+        return { cancelled: true };
+      }
+      return { cancelled: false, filePath: result.filePaths[0] };
+    } catch (error: any) {
+      return { cancelled: false, error: error?.message ?? 'Failed to open file dialog.' };
+    }
+  });
+
+  safeHandle("persona:upload-jd", async (_, filePath: unknown, eventId: unknown) => {
+    try {
+      if (typeof filePath !== 'string' || !filePath.trim()) {
+        return { success: false, error: 'filePath is required' };
+      }
+      if (typeof eventId !== 'string' || !eventId.trim()) {
+        return { success: false, error: 'eventId is required' };
+      }
+      const { PersonaManager } = require('./persona/PersonaManager') as typeof import('./persona/PersonaManager');
+      const summary = await PersonaManager.getInstance().uploadJD(filePath, eventId);
+      try {
+        const { PrepOrchestrator } = require('./services/PrepOrchestrator');
+        PrepOrchestrator.getInstance().invalidate(eventId);
+      } catch { /* silent */ }
+      return { success: true, summary };
+    } catch (error: any) {
+      console.error('[IPC] persona:upload-jd error:', error);
+      return { success: false, error: error?.message ?? 'Failed to process JD.' };
+    }
+  });
+
+  safeHandle("persona:get-jd-for-event", async (_, eventId: unknown) => {
+    try {
+      if (typeof eventId !== 'string' || !eventId.trim()) {
+        return { success: false, error: 'eventId required' };
+      }
+      const { PersonaManager } = require('./persona/PersonaManager') as typeof import('./persona/PersonaManager');
+      const summary = PersonaManager.getInstance().getJDForEvent(eventId);
+      return { success: true, summary };
+    } catch (error: any) {
+      return { success: false, error: error?.message ?? 'Failed to read JD.' };
+    }
+  });
+
+  safeHandle("persona:clear-jd", async (_, eventId: unknown) => {
+    try {
+      if (typeof eventId !== 'string' || !eventId.trim()) {
+        return { success: false, error: 'eventId required' };
+      }
+      const { PersonaManager } = require('./persona/PersonaManager') as typeof import('./persona/PersonaManager');
+      PersonaManager.getInstance().clearJDForEvent(eventId);
+      // PREP-01: invalidate any cached brief for this event so the next
+      // generate() pass re-reads the absence of the JD.
+      try {
+        const { PrepOrchestrator } = require('./services/PrepOrchestrator');
+        PrepOrchestrator.getInstance().invalidate(eventId);
+      } catch { /* silent */ }
+      return { success: true };
+    } catch (error: any) {
+      return { success: false, error: error?.message ?? 'Failed to clear JD.' };
+    }
+  });
+
+  // ==========================================
+  // sensi M7 / PREP-01 (v2.12.0): Pre-meeting briefing
+  // Composes resume persona + JD + attached docs + company research
+  // into a scrollable markdown briefing the user can skim before a
+  // meeting. Briefs are cached 24h per event — pass `force: true` to
+  // regenerate after changing inputs between cache hits.
+  // ==========================================
+
+  safeHandle("prep:get-briefing", async (_, payload: unknown) => {
+    try {
+      if (!payload || typeof payload !== 'object') {
+        return { success: false, error: 'payload required' };
+      }
+      const p = payload as { eventId?: unknown; title?: unknown; description?: unknown; force?: unknown };
+      const eventId = typeof p.eventId === 'string' ? p.eventId.trim() : '';
+      const title = typeof p.title === 'string' ? p.title.trim() : '';
+      if (!eventId) return { success: false, error: 'eventId required' };
+      if (!title) return { success: false, error: 'title required' };
+      const description = typeof p.description === 'string' ? p.description : undefined;
+      const force = p.force === true;
+      const { PrepOrchestrator } = require('./services/PrepOrchestrator') as typeof import('./services/PrepOrchestrator');
+      const briefing = await PrepOrchestrator.getInstance().generate(
+        { eventId, title, description },
+        force
+      );
+      return { success: true, briefing };
+    } catch (error: any) {
+      console.error('[IPC] prep:get-briefing error:', error);
+      return { success: false, error: error?.message ?? 'Failed to generate briefing.' };
+    }
+  });
+
+  safeHandle("prep:invalidate", async (_, eventId: unknown) => {
+    try {
+      if (typeof eventId !== 'string' || !eventId) return { success: false, error: 'eventId required' };
+      const { PrepOrchestrator } = require('./services/PrepOrchestrator') as typeof import('./services/PrepOrchestrator');
+      PrepOrchestrator.getInstance().invalidate(eventId);
+      return { success: true };
+    } catch (error: any) {
+      return { success: false, error: error?.message ?? 'Failed to invalidate briefing cache.' };
+    }
+  });
+
+  safeHandle("knowledge-get-document-preview", async (_, id: unknown, maxChars: unknown) => {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { handleGetDocumentPreview } = require('./knowledge/knowledgeIpcHelpers') as typeof import('./knowledge/knowledgeIpcHelpers');
+    return handleGetDocumentPreview(getKnowledgeOrch(), id, maxChars);
+  });
+
+  // M4-T10 — Knowledge base export/import
+  safeHandle("knowledge-export", async (_, filePath: unknown) => {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { handleExportKnowledge } = require('./knowledge/knowledgeIpcHelpers') as typeof import('./knowledge/knowledgeIpcHelpers');
+    return await handleExportKnowledge(getKnowledgeOrch(), filePath);
+  });
+
+  safeHandle("knowledge-import", async (_, filePath: unknown) => {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { handleImportKnowledge } = require('./knowledge/knowledgeIpcHelpers') as typeof import('./knowledge/knowledgeIpcHelpers');
+    return await handleImportKnowledge(getKnowledgeOrch(), filePath);
+  });
+
+  // M4-T10 — Thin dialog wrappers for knowledge export/import paths.
+  // Renderer must own file path picking (trust-boundary rule); the
+  // existing `profileSelectFile` filter is pdf/docx/txt which does
+  // not fit a .json knowledge artifact, and there is no existing
+  // save-dialog IPC. These two helpers are the minimum additions.
+  safeHandle("knowledge-pick-export-path", async () => {
+    try {
+      const result: any = await dialog.showSaveDialog({
+        title: 'Export knowledge base',
+        defaultPath: `sensi-knowledge-${new Date().toISOString().slice(0, 10)}.json`,
+        filters: [{ name: 'sensi knowledge export', extensions: ['json'] }],
+      });
+      if (result.canceled || !result.filePath) {
+        return { cancelled: true };
+      }
+      return { cancelled: false, filePath: result.filePath as string };
+    } catch (error: any) {
+      return { cancelled: false, error: error?.message ?? 'dialog failed' };
+    }
+  });
+
+  safeHandle("knowledge-pick-import-path", async () => {
+    try {
+      const result: any = await dialog.showOpenDialog({
+        title: 'Import knowledge base',
+        properties: ['openFile'],
+        filters: [{ name: 'sensi knowledge export', extensions: ['json'] }],
+      });
+      if (result.canceled || result.filePaths.length === 0) {
+        return { cancelled: true };
+      }
+      return { cancelled: false, filePath: result.filePaths[0] as string };
+    } catch (error: any) {
+      return { cancelled: false, error: error?.message ?? 'dialog failed' };
+    }
+  });
+
+  // ── M5-T5: Rolling-response trigger mode ─────────────────────
+  // Typed setter + getter for the rolling-response trigger cadence.
+  // Persisted via SettingsManager ('rollingTriggerMode' key). The
+  // policy object itself lives inside IntelligenceEngine (wired in
+  // M5-T6). These handlers only read/write the persisted setting —
+  // they do not dispatch anything.
+  safeHandle("set-rolling-trigger-mode", async (_, mode: unknown) => {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { isValidRollingTriggerMode } = require('./llm/RollingTriggerPolicy') as typeof import('./llm/RollingTriggerPolicy');
+    if (!isValidRollingTriggerMode(mode)) {
+      return { success: false, error: `Invalid mode: ${String(mode)}. Expected 'off' | 'on-silence' | 'on-demand'.` };
+    }
+    try {
+      const { SettingsManager } = require('./services/SettingsManager') as typeof import('./services/SettingsManager');
+      SettingsManager.getInstance().set('rollingTriggerMode', mode);
+      // Broadcast so any window showing the mode selector re-syncs.
+      const helper = appState.getWindowHelper();
+      helper.getLauncherWindow()?.webContents.send('rolling-trigger-mode-changed', { mode });
+      helper.getOverlayWindow()?.webContents.send('rolling-trigger-mode-changed', { mode });
+      // If the engine is already holding a policy, update it too.
+      const engine = appState.getIntelligenceManager();
+      if (engine && typeof (engine as any).setRollingTriggerMode === 'function') {
+        (engine as any).setRollingTriggerMode(mode);
+      }
+      return { success: true };
+    } catch (error: any) {
+      return { success: false, error: error?.message ?? 'failed to persist mode' };
+    }
+  });
+
+  safeHandle("get-rolling-trigger-mode", async () => {
+    try {
+      const { SettingsManager } = require('./services/SettingsManager') as typeof import('./services/SettingsManager');
+      // BUGFIX 2026-04-17: default changed from 'on-silence' to 'off' to
+      // match the IntelligenceEngine default. On-silence auto-fires after
+      // any transcript including the user's own speech, surprising new
+      // users with unexpected AI replies to their own test utterances.
+      const mode = SettingsManager.getInstance().get('rollingTriggerMode') ?? 'off';
+      return mode;
+    } catch (error: any) {
+      // Fall back to the default on any read error; never throw across
+      // the IPC boundary for a simple settings read.
+      return 'off';
+    }
+  });
+
+  // v2.14.8: auto-answer sensitivity — how many ms of silence before the
+  // on-silence trigger fires. Clamped to 500–10_000 ms. Persists to
+  // SettingsManager and live-updates the running policy.
+  safeHandle("set-rolling-trigger-silence-ms", async (_, raw: unknown) => {
+    const ms = Number(raw);
+    if (!Number.isFinite(ms)) {
+      return { success: false, error: 'silenceMs must be a finite number' };
+    }
+    const clamped = Math.min(10_000, Math.max(500, Math.round(ms)));
+    try {
+      const { SettingsManager } = require('./services/SettingsManager') as typeof import('./services/SettingsManager');
+      SettingsManager.getInstance().set('rollingTriggerSilenceMs', clamped);
+      const engine = appState.getIntelligenceManager();
+      if (engine && typeof (engine as any).setRollingTriggerSilenceMs === 'function') {
+        (engine as any).setRollingTriggerSilenceMs(clamped);
+      }
+      return { success: true, silenceMs: clamped };
+    } catch (error: any) {
+      return { success: false, error: error?.message ?? 'failed to persist silence threshold' };
+    }
+  });
+
+  safeHandle("get-rolling-trigger-silence-ms", async () => {
+    try {
+      const { SettingsManager } = require('./services/SettingsManager') as typeof import('./services/SettingsManager');
+      const raw = SettingsManager.getInstance().get('rollingTriggerSilenceMs');
+      if (typeof raw === 'number' && Number.isFinite(raw) && raw >= 500 && raw <= 10_000) {
+        return raw;
+      }
+      return 2500;
+    } catch {
+      return 2500;
+    }
   });
 
   // ── Permissions ──────────────────────────────────────────────
