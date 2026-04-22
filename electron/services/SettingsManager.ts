@@ -46,6 +46,15 @@ export interface AppSettings {
     // meeting to the cross-meeting memory engine (sensi-cloud → Graphiti).
     // Default ON for signed-in users, no effect when signed out.
     memoryEngineEnabled?: boolean;
+    // PERF-03 (v2.17.0): when true, sensi skips heavy features and
+    // animations to stay responsive on slow laptops. Auto-seeded once
+    // on first launch from HardwareProfile; user can override in
+    // Settings → General → Performance.
+    lowResourceMode?: boolean;
+    // PERF-03 internal: timestamp we first detected hardware class.
+    // Used to know whether `lowResourceMode` was auto-seeded (never
+    // overwrite a user-set value).
+    hardwareDetectedAt?: number;
 }
 
 export class SettingsManager {

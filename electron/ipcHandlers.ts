@@ -3350,6 +3350,30 @@ export function initializeIpcHandlers(appState: AppState): void {
     }
   });
 
+  // ==========================================
+  // PERF-03 (v2.17.0) — low-resource mode + hardware profile
+  // ==========================================
+
+  safeHandle("perf:get-profile", async () => {
+    const { detectHardware } = require('./services/HardwareProfile') as typeof import('./services/HardwareProfile');
+    const { SettingsManager } = require('./services/SettingsManager') as typeof import('./services/SettingsManager');
+    const profile = detectHardware();
+    const current = SettingsManager.getInstance().get('lowResourceMode');
+    return {
+      cores: profile.cores,
+      gbRam: profile.gbRam,
+      autoIsLowResource: profile.isLowResource,
+      autoReason: profile.reason,
+      currentLowResource: current === true,
+    };
+  });
+
+  safeHandle("perf:set-low-resource", async (_, enabled: boolean) => {
+    const { SettingsManager } = require('./services/SettingsManager') as typeof import('./services/SettingsManager');
+    SettingsManager.getInstance().set('lowResourceMode', !!enabled);
+    return { success: true };
+  });
+
   safeHandle("memory:purge", async () => {
     try {
       const { AuthManager } = require('./services/AuthManager') as typeof import('./services/AuthManager');

@@ -323,6 +323,16 @@ interface ElectronAPI {
   memoryGetQueueSize: () => Promise<{ pending: number }>;
   memoryPurge: () => Promise<{ success: boolean; deleted?: number; error?: string }>;
 
+  // PERF-03 (v2.17.0) — low-resource mode
+  perfGetProfile: () => Promise<{
+    cores: number;
+    gbRam: number;
+    autoIsLowResource: boolean;
+    autoReason: string | null;
+    currentLowResource: boolean;
+  }>;
+  perfSetLowResource: (enabled: boolean) => Promise<{ success: boolean }>;
+
   onAuthStateChanged: (callback: (state: unknown) => void) => () => void;
   onCalendarConnectionChanged: (
     callback: (status: { connected: boolean; email?: string }) => void,
@@ -1272,6 +1282,10 @@ contextBridge.exposeInMainWorld("electronAPI", {
   memorySetEnabled: (enabled: boolean) => ipcRenderer.invoke('memory:set-enabled', enabled),
   memoryGetQueueSize: () => ipcRenderer.invoke('memory:get-queue-size'),
   memoryPurge: () => ipcRenderer.invoke('memory:purge'),
+
+  // PERF-03 (v2.17.0) — low-resource mode
+  perfGetProfile: () => ipcRenderer.invoke('perf:get-profile'),
+  perfSetLowResource: (enabled: boolean) => ipcRenderer.invoke('perf:set-low-resource', enabled),
 
   onAuthStateChanged: (callback: (state: unknown) => void) => {
     const sub = (_: unknown, state: unknown) => callback(state);

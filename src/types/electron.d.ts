@@ -365,6 +365,16 @@ export interface ElectronAPI {
   memoryGetQueueSize: () => Promise<{ pending: number }>
   memoryPurge: () => Promise<{ success: boolean; deleted?: number; error?: string }>
 
+  // PERF-03 (v2.17.0) — low-resource mode
+  perfGetProfile: () => Promise<{
+    cores: number
+    gbRam: number
+    autoIsLowResource: boolean
+    autoReason: string | null
+    currentLowResource: boolean
+  }>
+  perfSetLowResource: (enabled: boolean) => Promise<{ success: boolean }>
+
   onAuthStateChanged: (callback: (state: SensiAuthStateIpc) => void) => () => void
   onCalendarConnectionChanged: (
     callback: (status: { connected: boolean; email?: string }) => void,

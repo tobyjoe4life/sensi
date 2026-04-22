@@ -11,9 +11,85 @@ import {
     prepareTranscriptForWhatToAnswer, buildTemporalContext,
     AssistantResponse as LLMAssistantResponse, classifyIntent
 } from './llm';
+import { RollingTriggerPolicy, RollingTriggerMode, isValidRollingTriggerMode } from './llm/RollingTriggerPolicy';
+
+/**
+ * sensi M4-T8: defensive factory for the WhatToAnswerLLM knowledge hook.
+ *
+ * Called at IntelligenceEngine.initializeLLMs() construction time. If
+ * anything in the chain fails (DatabaseManager not ready, sqlite-vec
+ * extension not loaded, orchestrator construction throws), returns null
+ * and WhatToAnswerLLM is constructed WITHOUT a hook — live-assist runs
+ * exactly like pre-M4-T7 behavior. Live-assist must never crash because
+ * of a knowledge-wiring issue. See DECISIONS.md D021.
+ *
+ * Uses lazy require() for both DatabaseManager (to avoid circular
+ * import) and the knowledge module (to defer pdfjs-dist loading until
+ * the knowledge base is actually used at runtime).
+ */
+function buildKnowledgeContextClosureOrNull(): ((query: string, eventId?: string) => Promise<string>) | null {
+    try {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const { DatabaseManager } = require('./db/DatabaseManager') as typeof import('./db/DatabaseManager');
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const { makeKnowledgeContextClosure } =
+            require('./knowledge/knowledgeIpcHelpers') as typeof import('./knowledge/knowledgeIpcHelpers');
+        return makeKnowledgeContextClosure(() =>
+            DatabaseManager.getInstance().getKnowledgeOrchestrator()
+        );
+    } catch (e) {
+        console.warn(
+            '[IntelligenceEngine] Knowledge context closure unavailable, live-assist will run without knowledge hook:',
+            e instanceof Error ? e.message : String(e)
+        );
+        return null;
+    }
+}
+
+/**
+ * sensi M7 / PERSONA-01: build the persona context closure used by
+ * WhatToAnswerLLM. Lazy-requires PersonaManager so a defect-level
+ * wiring bug can't crash the live-assist init path. Returns null on
+ * any import failure — the LLM just skips the persona block.
+ */
+function buildPersonaContextClosureOrNull(): ((eventId?: string) => string) | null {
+    try {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const { PersonaManager } = require('./persona/PersonaManager') as typeof import('./persona/PersonaManager');
+        return (eventId?: string) =>
+            PersonaManager.getInstance().buildContextBlock(eventId ?? null);
+    } catch (e) {
+        console.warn(
+            '[IntelligenceEngine] Persona context closure unavailable, live-assist will run without persona hook:',
+            e instanceof Error ? e.message : String(e)
+        );
+        return null;
+    }
+}
 
 // Mode types
 export type IntelligenceMode = 'idle' | 'assist' | 'what_to_say' | 'follow_up' | 'recap' | 'clarify' | 'manual' | 'follow_up_questions' | 'code_hint' | 'brainstorm';
+
+/**
+ * M5-T6 — pure gate for the intent-classifier path.
+ *
+ * When `rollingMode === 'off'` the user has explicitly disabled
+ * every auto-trigger. The refinement intent classifier is one such
+ * auto-trigger (it watches user turns for refinement patterns and
+ * fires runFollowUp). In 'off' mode it must be suppressed.
+ *
+ * In every other mode ('on-silence' and 'on-demand'), the classifier
+ * is allowed to run — it fires runFollowUp (refinement of the LAST
+ * assistant message), not a new rolling response, so it does not
+ * conflict with the silence-triggered rolling path.
+ *
+ * Exposed for tests. Pure function, no side effects.
+ */
+export function shouldRunRefinementClassifier(
+    rollingMode: RollingTriggerMode
+): boolean {
+    return rollingMode !== 'off';
+}
 
 // Refinement intent detection (refined to avoid false positives)
 function detectRefinementIntent(userText: string): { isRefinement: boolean; intent: string } {
@@ -86,11 +162,187 @@ export class IntelligenceEngine extends EventEmitter {
     private lastTriggerTime: number = 0;
     private readonly triggerCooldown: number = 3000; // 3 seconds
 
+    // M5-T6: rolling-response trigger policy. Consulted from the transcript
+    // feed and a periodic tick to dispatch runWhatShouldISay when the silence
+    // policy fires. Instantiated with initial mode from SettingsManager.
+    private readonly rollingPolicy: RollingTriggerPolicy;
+    private rollingTickIntervalId: ReturnType<typeof setInterval> | null = null;
+    // PERF-01: bumped from 300 → 500 ms. Fewer wakeups on the event loop;
+    // silence-fire detection still reacts within one user heartbeat.
+    private static readonly ROLLING_TICK_MS = 500;
+
     constructor(llmHelper: LLMHelper, session: SessionTracker) {
         super();
         this.llmHelper = llmHelper;
         this.session = session;
+        this.rollingPolicy = this.buildRollingPolicy();
         this.initializeLLMs();
+        this.startRollingTriggerTick();
+    }
+
+    /**
+     * M5-T6: build the RollingTriggerPolicy seeded from SettingsManager.
+     * Defensive: if SettingsManager is not available (unit tests), fall back
+     * to 'off'.
+     *
+     * BUGFIX 2026-04-17: default changed from 'on-silence' to 'off'. With
+     * `on-silence` as default, new users saw the app auto-answer their own
+     * test speech during setup, because the silence trigger fires 1.5 s
+     * after any transcript — including the user's own mic. Default is now
+     * manual until the user explicitly opts in via the Settings toggle.
+     */
+    private buildRollingPolicy(): RollingTriggerPolicy {
+        let initialMode: RollingTriggerMode = 'off';
+        let persistedThreshold: number | undefined;
+        try {
+            // eslint-disable-next-line @typescript-eslint/no-require-imports
+            const { SettingsManager } = require('./services/SettingsManager') as typeof import('./services/SettingsManager');
+            const sm = SettingsManager.getInstance();
+            const persisted = sm.get('rollingTriggerMode');
+            if (isValidRollingTriggerMode(persisted)) {
+                initialMode = persisted;
+            }
+            const rawThreshold = sm.get('rollingTriggerSilenceMs');
+            if (typeof rawThreshold === 'number' && Number.isFinite(rawThreshold) && rawThreshold >= 500 && rawThreshold <= 10_000) {
+                persistedThreshold = rawThreshold;
+            }
+        } catch (e) {
+            console.warn(
+                '[IntelligenceEngine] SettingsManager unavailable for RollingTriggerPolicy, defaulting to on-silence:',
+                e instanceof Error ? e.message : String(e)
+            );
+        }
+        const policy = new RollingTriggerPolicy({ initialMode });
+        if (persistedThreshold !== undefined) {
+            policy.getSilenceDetector().setThresholdMs(persistedThreshold);
+        }
+        return policy;
+    }
+
+    /**
+     * v2.14.8: live-update the auto-answer silence threshold. Called by
+     * the settings IPC when the user drags the sensitivity slider.
+     * Clamped 500–10_000 ms so a bad input can't break detection.
+     */
+    setRollingTriggerSilenceMs(ms: number): void {
+        if (typeof ms !== 'number' || !Number.isFinite(ms)) return;
+        const clamped = Math.min(10_000, Math.max(500, Math.round(ms)));
+        this.rollingPolicy.getSilenceDetector().setThresholdMs(clamped);
+    }
+
+    getRollingTriggerSilenceMs(): number {
+        return this.rollingPolicy.getSilenceDetector().getThresholdMs();
+    }
+
+    // ============================================
+    // v2.15.0 — VAD-driven turn detection + cancel-on-speech
+    // ============================================
+
+    /**
+     * Called by main.ts when Deepgram emits UtteranceEnd for the
+     * interviewer stream. Arms the policy to fire on the next tick
+     * regardless of the silence timer (Deepgram's VAD is more reliable).
+     */
+    handleUtteranceEnd(): void {
+        this.rollingPolicy.noteUtteranceEnd();
+    }
+
+    /**
+     * Cancel the active rolling-response stream. Called when the
+     * interviewer resumes speaking mid-stream. Reuses the existing
+     * `assistCancellationToken` which is checked throughout the run
+     * methods. Idempotent — safe to call when no stream is active.
+     *
+     * Also notifies the renderer so it can swap the "thinking…"
+     * indicator for "listening…" until the next UtteranceEnd re-fires.
+     */
+    cancelActiveStream(): void {
+        if (this.assistCancellationToken) {
+            try { this.assistCancellationToken.abort(); } catch { /* noop */ }
+            this.assistCancellationToken = null;
+        }
+        this.rollingPolicy.markStreamFinished();
+        try {
+            // eslint-disable-next-line @typescript-eslint/no-require-imports
+            const { BrowserWindow } = require('electron') as typeof import('electron');
+            for (const win of BrowserWindow.getAllWindows()) {
+                if (!win.isDestroyed()) {
+                    win.webContents.send('rolling-stream-cancelled');
+                }
+            }
+        } catch { /* noop */ }
+    }
+
+    /**
+     * M5-T6: ~300ms tick that consults the rolling policy. When silence has
+     * lasted past the threshold and the policy is in on-silence mode, fire
+     * runWhatShouldISay() with no explicit question (the LLM infers from
+     * the transcript). Guarded by the policy's in-flight + debounce logic.
+     */
+    private startRollingTriggerTick(): void {
+        if (this.rollingTickIntervalId !== null) return;
+        this.rollingTickIntervalId = setInterval(() => {
+            // PERF-01: bail out cheap when rolling mode is off.
+            // Avoids calling into policy + session on every tick while the
+            // user isn't using auto-answer (the overwhelming common case
+            // since rolling mode defaults to 'off' for new users).
+            if (this.rollingPolicy.getMode() === 'off') return;
+            const reason = this.rollingPolicy.shouldFireOnSilence();
+            if (!reason) return;
+            this.rollingPolicy.markFiredOnSilence();
+            // Fire-and-forget: runWhatShouldISay() wraps itself in
+            // markStreamStarted/Finished via the explicit calls below.
+            void this.runWhatShouldISay(undefined, 0.8, undefined);
+        }, IntelligenceEngine.ROLLING_TICK_MS);
+    }
+
+    private stopRollingTriggerTick(): void {
+        if (this.rollingTickIntervalId !== null) {
+            clearInterval(this.rollingTickIntervalId);
+            this.rollingTickIntervalId = null;
+        }
+    }
+
+    /**
+     * M5-T6: exposed for the IPC handler so user-facing mode changes
+     * land on the live policy immediately (not just on next restart).
+     */
+    setRollingTriggerMode(mode: RollingTriggerMode): void {
+        this.rollingPolicy.setMode(mode);
+    }
+
+    getRollingTriggerMode(): RollingTriggerMode {
+        return this.rollingPolicy.getMode();
+    }
+
+    /** Exposed for M5-T6 integration tests. */
+    getRollingTriggerPolicy(): RollingTriggerPolicy {
+        return this.rollingPolicy;
+    }
+
+    /**
+     * M6-A: auto-attach the most recent Live Coding frame if one exists,
+     * else undefined. Used by runWhatShouldISay and runCodeHint when the
+     * caller didn't provide explicit screenshots. Lazy-require to avoid a
+     * circular dependency on the LiveScreenCapture singleton.
+     */
+    private tryAttachLiveFrame(): string[] | undefined {
+        try {
+            // eslint-disable-next-line @typescript-eslint/no-require-imports
+            const { LiveScreenCapture } = require('./services/LiveScreenCapture') as typeof import('./services/LiveScreenCapture');
+            const frame = LiveScreenCapture.getInstance().getLatestFrame();
+            if (!frame) return undefined;
+            // Frame must still exist on disk — the ring buffer evicts files.
+            // eslint-disable-next-line @typescript-eslint/no-require-imports
+            const fs = require('fs') as typeof import('fs');
+            if (!fs.existsSync(frame.path)) return undefined;
+            const ageMs = Date.now() - frame.capturedAt;
+            console.log(`[IntelligenceEngine] attached live frame (${ageMs}ms old)`);
+            return [frame.path];
+        } catch (err) {
+            // Never let a missing/broken live-capture path break a normal Code Hint call
+            return undefined;
+        }
     }
 
     getLLMHelper(): LLMHelper {
@@ -117,7 +369,27 @@ export class IntelligenceEngine extends EventEmitter {
         this.followUpLLM = new FollowUpLLM(this.llmHelper);
         this.recapLLM = new RecapLLM(this.llmHelper);
         this.followUpQuestionsLLM = new FollowUpQuestionsLLM(this.llmHelper);
-        this.whatToAnswerLLM = new WhatToAnswerLLM(this.llmHelper);
+
+        // sensi M4-T8: wire WhatToAnswerLLM with the knowledge-context
+        // closure from the real M4-T6 orchestrator. Defensive: if
+        // DatabaseManager / sqlite-vec / the orchestrator chain fails
+        // to construct (e.g. sqlite-vec extension didn't load), the
+        // factory returns null and WhatToAnswerLLM falls back to
+        // pre-M4-T7 behavior (no knowledge hook, live-assist continues
+        // normally). Live-assist must NEVER break because of knowledge
+        // wiring — see DECISIONS.md D021.
+        const knowledgeContextFn = buildKnowledgeContextClosureOrNull();
+        // sensi M7 / PERSONA-01: persona hook. Reads the latest resume
+        // persona row on every live-assist call (SQLite is cheap and the
+        // row is tiny). Null-safe — returns '' when no persona is
+        // stored, which WhatToAnswerLLM treats as "skip the block".
+        const personaContextFn = buildPersonaContextClosureOrNull();
+        this.whatToAnswerLLM = new WhatToAnswerLLM(
+            this.llmHelper,
+            knowledgeContextFn ?? undefined,
+            personaContextFn ?? undefined
+        );
+
         this.codeHintLLM = new CodeHintLLM(this.llmHelper);
         this.brainstormLLM = new BrainstormLLM(this.llmHelper);
 
@@ -127,6 +399,16 @@ export class IntelligenceEngine extends EventEmitter {
 
     reinitializeLLMs(): void {
         this.initializeLLMs();
+    }
+
+    /**
+     * sensi M7 / KNOWLEDGE-02: push the active meeting's calendar event id
+     * to the What-to-Answer LLM so the knowledge hook can prefer docs
+     * attached to that event over global pinned/retrieved context.
+     * IntelligenceManager calls this whenever meeting metadata is set.
+     */
+    setActiveEventId(eventId: string | null): void {
+        this.whatToAnswerLLM?.setActiveEventId(eventId);
     }
 
     // ============================================
@@ -139,6 +421,46 @@ export class IntelligenceEngine extends EventEmitter {
     handleTranscript(segment: TranscriptSegment, skipRefinementCheck: boolean = false): void {
         const result = this.session.handleTranscript(segment);
         this.lastTranscriptTime = Date.now();
+
+        // M5-T6 + 2026-04-17 speaker bugfix: feed the rolling-trigger
+        // policy so its SilenceDetector resets when the INTERVIEWER
+        // finishes a final segment. The user's own speech (the `user`
+        // speaker) does NOT count toward the silence baseline —
+        // otherwise the app auto-fires runWhatShouldISay after the user
+        // talks, answering the user's own words as if they were the
+        // interviewer's question. The policy's noteSegment handles the
+        // speaker gate internally; we just pass the tag through.
+        const resolvedSpeaker: 'interviewer' | 'user' =
+            segment.speaker === 'user' ? 'user' : 'interviewer';
+        this.rollingPolicy.noteSegment({
+            isFinal: segment.final,
+            timestampMs: segment.timestamp ?? Date.now(),
+            speaker: resolvedSpeaker
+        });
+
+        // v2.15.0: cancel-on-speech. If the interviewer resumes speaking
+        // (any new transcript, interim or final) while a rolling response
+        // is streaming, abort the stream so the next turn-end can re-fire
+        // with the now-fuller question. The policy's own in-flight guard
+        // takes care of not double-firing; we just need to stop the
+        // current stream promptly.
+        if (
+            resolvedSpeaker === 'interviewer' &&
+            segment.text.trim().length > 0 &&
+            this.rollingPolicy.isStreamInFlight() &&
+            this.rollingPolicy.getMode() === 'on-silence'
+        ) {
+            this.cancelActiveStream();
+        }
+
+        // M5-T6: when rolling mode is 'off', the intent-classifier path
+        // (refinement detection → runFollowUp) is also disabled. This is
+        // the "off means really off" contract: the user who turned auto
+        // triggers off does not expect the refinement classifier to keep
+        // firing runFollowUp in the background.
+        if (!shouldRunRefinementClassifier(this.rollingPolicy.getMode())) {
+            return;
+        }
 
         // Check for follow-up intent if user is speaking
         if (result && !skipRefinementCheck && result.role === 'user' && this.session.getLastAssistantMessage()) {
@@ -222,6 +544,14 @@ export class IntelligenceEngine extends EventEmitter {
     async runWhatShouldISay(question?: string, confidence: number = 0.8, imagePaths?: string[]): Promise<string | null> {
         const now = Date.now();
 
+        // M6-A (v2.6.0): if the caller provided no screenshot AND Live Coding
+        // mode is capturing frames, auto-attach the most recent frame. Lets
+        // the user invoke Ctrl+1 without a manual Ctrl+H first. Silently
+        // skipped when Live Coding is off or the buffer is empty.
+        if (!imagePaths || imagePaths.length === 0) {
+            imagePaths = this.tryAttachLiveFrame();
+        }
+
         // Bypass cooldown when the user explicitly attached images (capture-and-process intent).
         // The cooldown exists to debounce auto-triggers, not explicit shortcuts with context.
         const hasImages = imagePaths && imagePaths.length > 0;
@@ -236,6 +566,10 @@ export class IntelligenceEngine extends EventEmitter {
 
         this.setMode('what_to_say');
         this.lastTriggerTime = now;
+
+        // M5-T6: tell the rolling-trigger policy a stream is in flight so
+        // the periodic tick does not re-fire while this response streams.
+        this.rollingPolicy.markStreamStarted();
 
         try {
             if (!this.whatToAnswerLLM) {
@@ -346,6 +680,68 @@ export class IntelligenceEngine extends EventEmitter {
             this.emit('error', error as Error, 'what_to_say');
             this.setMode('idle');
             return "Could you repeat that? I want to make sure I address your question properly.";
+        } finally {
+            // M5-T6: release the policy's in-flight guard on every exit path
+            // (success, abort, error). Without this, a crashed stream would
+            // permanently block future silence triggers.
+            this.rollingPolicy.markStreamFinished();
+        }
+    }
+
+    /**
+     * v2.6.2 — ASSESSMENT SOLVE
+     *
+     * Solo coding assessment solver (LeetCode, HackerRank, take-homes). Takes
+     * a screenshot of the problem statement and returns the full worked answer
+     * (Problem / Approach / Solution / Edge cases / Walkthrough). No
+     * transcript context is needed — the screenshot is authoritative.
+     *
+     * Streams via the same `suggested_answer_token` event the What-to-answer
+     * flow uses, so the renderer's existing receiver logic reuses unchanged.
+     */
+    async runAssessmentSolve(imagePaths: string[]): Promise<string | null> {
+        if (!imagePaths || imagePaths.length === 0) {
+            console.warn('[IntelligenceEngine] runAssessmentSolve called with no screenshot');
+            return null;
+        }
+
+        this.setMode('what_to_say');
+        this.rollingPolicy.markStreamStarted();
+
+        try {
+            // eslint-disable-next-line @typescript-eslint/no-require-imports
+            const { ASSESSMENT_SOLVE_PROMPT } = require('./llm/prompts') as typeof import('./llm/prompts');
+            const generationId = ++this.currentGenerationId;
+            let fullAnswer = '';
+            const stream = this.llmHelper.streamChat(
+                'Answer the question(s) visible in the attached screenshot. Detect the question type first (coding / MCQ / true-false / fill-in / short-answer / essay / math / matching / diagram / knowledge quiz), then reply using the section headings for that type as defined in your instructions.',
+                imagePaths,
+                undefined,
+                ASSESSMENT_SOLVE_PROMPT,
+                true
+            );
+
+            for await (const token of stream) {
+                if (this.currentGenerationId !== generationId) {
+                    console.log('[IntelligenceEngine] assessment-solve stream aborted by newer generation');
+                    break;
+                }
+                this.emit('suggested_answer_token', token, 'Assessment', 0.99);
+                fullAnswer += token;
+            }
+
+            if (fullAnswer.trim().length > 0) {
+                this.session.addAssistantMessage(fullAnswer);
+                this.emit('suggested_answer', fullAnswer, 'Assessment', 0.99);
+            }
+            this.setMode('idle');
+            return fullAnswer || null;
+        } catch (error) {
+            this.emit('error', error as Error, 'what_to_say');
+            this.setMode('idle');
+            return null;
+        } finally {
+            this.rollingPolicy.markStreamFinished();
         }
     }
 
@@ -661,6 +1057,12 @@ export class IntelligenceEngine extends EventEmitter {
             this.assistCancellationToken = null;
         }
 
+        // M6-A (v2.6.0): auto-attach latest live frame if caller has none.
+        // Key UX: "Ctrl+6 just works" even without a manual Ctrl+H first.
+        if (!imagePaths || imagePaths.length === 0) {
+            imagePaths = this.tryAttachLiveFrame();
+        }
+
         this.setMode('code_hint');
 
         try {
@@ -827,5 +1229,17 @@ export class IntelligenceEngine extends EventEmitter {
             this.assistCancellationToken.abort();
             this.assistCancellationToken = null;
         }
+        // M5-T6: clear the policy's silence + in-flight state at session
+        // boundaries. Mode is preserved (user preference, not session state).
+        this.rollingPolicy.reset();
+    }
+
+    /**
+     * M5-T6: explicit teardown for tests and app shutdown. Stops the
+     * periodic tick that polls the rolling-trigger policy. Not called
+     * during reset() because the engine stays alive across meetings.
+     */
+    destroy(): void {
+        this.stopRollingTriggerTick();
     }
 }

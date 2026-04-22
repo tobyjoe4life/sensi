@@ -288,6 +288,16 @@ export class AppState {
   constructor() {
     // 1. Load boot-critical settings first (used by WindowHelpers)
     const settingsManager = SettingsManager.getInstance();
+
+    // PERF-03: auto-seed lowResourceMode on first launch before anything
+    // downstream reads it (warmup scheduler, feature guards).
+    try {
+      const { bootstrapHardwareProfile } = require('./services/HardwareProfile') as typeof import('./services/HardwareProfile');
+      bootstrapHardwareProfile();
+    } catch (e) {
+      console.warn('[AppState] HardwareProfile bootstrap skipped:', e);
+    }
+
     this.isUndetectable = settingsManager.get('isUndetectable') ?? false;
     this.disguiseMode = settingsManager.get('disguiseMode') ?? 'none';
     this._verboseLogging = settingsManager.get('verboseLogging') ?? false;
@@ -480,15 +490,28 @@ export class AppState {
 
     // Initialize RAGManager (requires database to be ready)
     this.initializeRAGManager()
-    
-    // Check and prep Ollama embedding model
-    this.bootstrapOllamaEmbeddings()
 
-
+    // PERF-01 (v2.17.0): defer Ollama bootstrap + intent classifier warmup
+    // until AFTER the launcher window has painted. On cold start these
+    // each take 500-2000 ms of CPU; running them synchronously during
+    // app boot extends time-to-first-paint noticeably. Delay the heavy
+    // ONNX work by 3 s to let the UI settle first. Skips entirely when
+    // low-resource mode is on (checked at fire time via SettingsManager).
     this.setupIntelligenceEvents()
 
-    // Pre-warm the zero-shot intent classifier in background
-    warmupIntentClassifier();
+    const deferredWarmupMs = 3000;
+    setTimeout(() => {
+      try {
+        const sm = require('./services/SettingsManager') as typeof import('./services/SettingsManager');
+        const lowRes = sm.SettingsManager.getInstance().get('lowResourceMode');
+        if (lowRes === true) {
+          console.log('[Perf] Skipping Ollama + intent-classifier warmup (low-resource mode).');
+          return;
+        }
+      } catch { /* settings not ready — warm up anyway */ }
+      this.bootstrapOllamaEmbeddings();
+      warmupIntentClassifier();
+    }, deferredWarmupMs).unref?.();
 
     // Setup Ollama IPC
     this.setupOllamaIpcHandlers()

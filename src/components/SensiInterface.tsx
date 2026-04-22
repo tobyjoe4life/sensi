@@ -26,7 +26,11 @@ import {
     Code,
     Copy,
     Check,
-    PointerOff
+    PointerOff,
+    Search,
+    Video,
+    Square,
+    GitCompare
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
@@ -40,7 +44,6 @@ import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import 'katex/dist/katex.min.css';
-import { analytics, detectProviderType } from '../lib/analytics/analytics.service';
 import { useShortcuts } from '../hooks/useShortcuts';
 import { useResolvedTheme } from '../hooks/useResolvedTheme';
 import { getOverlayAppearance, OVERLAY_OPACITY_DEFAULT } from '../lib/overlayAppearance';
@@ -66,18 +69,20 @@ interface Message {
     };
 }
 
-interface NativelyInterfaceProps {
+interface SensiInterfaceProps {
     onEndMeeting?: () => void;
     overlayOpacity?: number;
 }
 
-const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, overlayOpacity = OVERLAY_OPACITY_DEFAULT }) => {
+const SensiInterface: React.FC<SensiInterfaceProps> = ({ onEndMeeting, overlayOpacity = OVERLAY_OPACITY_DEFAULT }) => {
     const isLightTheme = useResolvedTheme() === 'light';
     const [isExpanded, setIsExpanded] = useState(true);
     const [inputValue, setInputValue] = useState('');
     const { shortcuts, isShortcutPressed } = useShortcuts();
     const [messages, setMessages] = useState<Message[]>([]);
     const [isConnected, setIsConnected] = useState(false);
+    // M6-A v2.6.0: Live Coding capture-running indicator for the overlay chip.
+    const [liveCaptureRunning, setLiveCaptureRunning] = useState(false);
     const [isProcessing, setIsProcessing] = useState(false);
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
     const [conversationContext, setConversationContext] = useState<string>('');
@@ -90,7 +95,6 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
         return stored !== 'false';
     });
 
-    // Analytics State
     const requestStartTimeRef = useRef<number | null>(null);
 
     // Sync transcript setting
@@ -112,6 +116,31 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const contentRef = useRef<HTMLDivElement>(null);
     const scrollContainerRef = useRef<HTMLDivElement>(null);
+
+    // v2.4.10 scroll behavior (supersedes POLISH-01 auto-bottom-follow):
+    // When a new assistant (system) message appears, scroll its TOP into
+    // the viewport so the user can read the answer from the beginning.
+    // While that same message keeps streaming tokens (text grows), we DO
+    // NOT re-scroll — the user reads at their own pace. The identity of
+    // the anchored message is tracked by ID; only a NEW message id
+    // triggers a scroll. User-send scrolls via messagesEndRef below are
+    // unchanged and still fire smoothly to the bottom.
+    const anchoredAssistantIdRef = useRef<string | null>(null);
+    useEffect(() => {
+        const latest = messages[messages.length - 1];
+        if (!latest || latest.role !== 'system') return;
+        if (anchoredAssistantIdRef.current === latest.id) return;
+        anchoredAssistantIdRef.current = latest.id;
+        // rAF so the DOM has painted the new message div before we measure
+        requestAnimationFrame(() => {
+            const container = scrollContainerRef.current;
+            if (!container) return;
+            const el = container.querySelector<HTMLElement>(`[data-message-id="${latest.id}"]`);
+            if (!el) return;
+            const target = Math.max(0, el.offsetTop - container.offsetTop);
+            container.scrollTo({ top: target, behavior: 'smooth' });
+        });
+    }, [messages]);
     // Captures data from onCaptureAndProcess before the React state flush so
     // handleWhatToSay() can access it even in React 18 concurrent mode (where
     // a plain setTimeout(0) may fire before setAttachedContext flushes).
@@ -129,9 +158,31 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
 
     // Model Selection State
     const [currentModel, setCurrentModel] = useState<string>('gemini-3-flash-preview');
+    // sensi M1 Step 4: typed active-provider state for the header pill.
+    // Hydrated from llm:get-active-provider-and-model on mount and kept live
+    // via the onLlmActiveChanged subscription below. Null until the IPC
+    // resolves (loading) or when no provider is configured.
+    const [currentProvider, setCurrentProvider] = useState<import('@providers/types').ProviderId | null>(null);
+    const [providerPairLoaded, setProviderPairLoaded] = useState<boolean>(false);
 
     // Dynamic Action Button Mode (Recap vs Brainstorm)
     const [actionButtonMode, setActionButtonMode] = useState<'recap' | 'brainstorm'>('recap');
+
+    // sensi M7 / RESEARCH-01: standalone Tavily research chip
+    const [showResearchInput, setShowResearchInput] = useState(false);
+    const [researchQuery, setResearchQuery] = useState('');
+    const [researchLoading, setResearchLoading] = useState(false);
+    const researchInputRef = useRef<HTMLInputElement | null>(null);
+
+    // sensi M7 / MOTION-01: video / GIF motion-capture state
+    const [motionRecording, setMotionRecording] = useState(false);
+    const [motionFrameCount, setMotionFrameCount] = useState(0);
+    const [motionStartedAt, setMotionStartedAt] = useState<number | null>(null);
+    const [motionTick, setMotionTick] = useState(0); // forces re-render for timer
+    const [motionBusy, setMotionBusy] = useState(false);
+    const [pendingClipA, setPendingClipA] = useState<string[] | null>(null); // for comparison
+    const [motionDecision, setMotionDecision] = useState<{ frames: string[] } | null>(null);
+    const motionMaxFramesRef = useRef<number>(20);
 
     useEffect(() => {
         // Load persisted mode
@@ -145,6 +196,50 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
         });
         return () => { unsubscribe?.(); };
     }, []);
+
+    // sensi M7 / MOTION-01: keep frame count + elapsed timer up to date
+    // while recording. Frame count arrives via IPC; elapsed is a 500ms tick.
+    useEffect(() => {
+        const unsubFrame = window.electronAPI?.onMotionFrameCaptured?.((data) => {
+            setMotionFrameCount(data.frameCount);
+        });
+        const unsubAuto = window.electronAPI?.onMotionAutoStopped?.(() => {
+            // Backend hit the frame cap — mirror in the renderer and pull frames.
+            void (async () => {
+                try {
+                    // The backend already called stop() internally, so the IPC
+                    // stop() call would return no frames. But MotionCaptureManager
+                    // auto-stop emits before clearing state, so we can still stop
+                    // defensively and handle whatever is returned.
+                    const res = await window.electronAPI?.motionStop?.();
+                    setMotionRecording(false);
+                    setMotionStartedAt(null);
+                    if (res?.ok && Array.isArray(res.frames) && res.frames.length > 0) {
+                        if (pendingClipA) {
+                            const clipA = pendingClipA;
+                            setPendingClipA(null);
+                            setMotionFrameCount(0);
+                            void runMotionCompare(clipA, res.frames);
+                        } else {
+                            setMotionDecision({ frames: res.frames });
+                            setMotionFrameCount(0);
+                        }
+                    }
+                } catch (err) {
+                    console.warn('[SensiInterface] motion auto-stop handler failed:', err);
+                    setMotionRecording(false);
+                    setMotionStartedAt(null);
+                }
+            })();
+        });
+        return () => { unsubFrame?.(); unsubAuto?.(); };
+    }, [pendingClipA]);
+
+    useEffect(() => {
+        if (!motionRecording) return;
+        const interval = setInterval(() => setMotionTick(t => t + 1), 500);
+        return () => clearInterval(interval);
+    }, [motionRecording]);
 
     const codeTheme = isLightTheme ? oneLight : vscDarkPlus;
     const codeLineNumberColor = isLightTheme ? 'rgba(15,23,42,0.35)' : 'rgba(255,255,255,0.2)';
@@ -191,6 +286,33 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
             setCurrentModel(prev => prev === modelId ? prev : modelId);
         });
         return () => unsubscribe();
+    }, []);
+
+    // sensi M1 Step 4: hydrate the active provider+model pair on mount and
+    // subscribe to llm-active-changed for live updates. The legacy
+    // onModelChanged subscription above stays — it carries only the model
+    // string for back-compat. The new event carries both fields.
+    useEffect(() => {
+        let cancelled = false;
+        window.electronAPI?.getActiveProviderAndModel?.().then((pair) => {
+            if (cancelled || !pair) return;
+            setCurrentProvider(pair.provider);
+            if (pair.model) {
+                setCurrentModel(prev => (prev === pair.model ? prev : (pair.model as string)));
+            }
+            setProviderPairLoaded(true);
+        }).catch(() => {
+            if (!cancelled) setProviderPairLoaded(true);
+        });
+        const off = window.electronAPI?.onLlmActiveChanged?.((payload) => {
+            setCurrentProvider(payload.provider);
+            setCurrentModel(prev => (prev === payload.model ? prev : payload.model));
+            setProviderPairLoaded(true);
+        });
+        return () => {
+            cancelled = true;
+            off?.();
+        };
     }, []);
 
     // Global State Sync
@@ -251,27 +373,38 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
         };
     }, []);
 
-    // Auto-resize Window
+    // Auto-resize Window — PERF-02: rAF-throttled. ResizeObserver fires on
+    // every paint, including every streaming-markdown repaint. Unthrottled,
+    // this IPC storm (~60/s) kept the main process busy rendering window
+    // resizes during live answers and contributed to the "interview lag".
     useLayoutEffect(() => {
         if (!contentRef.current) return;
 
+        let rafId: number | null = null;
+        let lastW = 0;
+        let lastH = 0;
         const observer = new ResizeObserver((entries) => {
-            for (const entry of entries) {
-                // Use getBoundingClientRect to get the exact rendered size including padding
-                const rect = entry.target.getBoundingClientRect();
-
-                // Send exact dimensions to Electron
-                // Removed buffer to ensure tight fit
-                console.log('[NativelyInterface] ResizeObserver:', Math.ceil(rect.width), Math.ceil(rect.height));
-                window.electronAPI?.updateContentDimensions({
-                    width: Math.ceil(rect.width),
-                    height: Math.ceil(rect.height)
-                });
-            }
+            const entry = entries[entries.length - 1];
+            if (!entry) return;
+            const rect = entry.target.getBoundingClientRect();
+            const w = Math.ceil(rect.width);
+            const h = Math.ceil(rect.height);
+            if (w === lastW && h === lastH) return;
+            if (rafId !== null) return;
+            rafId = requestAnimationFrame(() => {
+                rafId = null;
+                if (w === lastW && h === lastH) return;
+                lastW = w;
+                lastH = h;
+                window.electronAPI?.updateContentDimensions({ width: w, height: h });
+            });
         });
 
         observer.observe(contentRef.current);
-        return () => observer.disconnect();
+        return () => {
+            observer.disconnect();
+            if (rafId !== null) cancelAnimationFrame(rafId);
+        };
     }, []);
 
     // Force resize when attachedContext changes (screenshots added/removed)
@@ -360,22 +493,51 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
     useEffect(() => {
         if (!window.electronAPI?.onSessionReset) return;
         const unsubscribe = window.electronAPI.onSessionReset(() => {
-            console.log('[NativelyInterface] Resetting session state...');
+            console.log('[SensiInterface] Resetting session state...');
             setMessages([]);
             setInputValue('');
             setAttachedContext([]);
             setManualTranscript('');
             setVoiceInput('');
             setIsProcessing(false);
+            // The rolling transcript bar can carry over the last interviewer
+            // utterance from the previous meeting if we don't clear it; the
+            // backend SessionTracker already resets its buffers, this aligns
+            // the UI with that reality.
+            setRollingTranscript('');
+            setIsInterviewerSpeaking(false);
+            voiceInputRef.current = '';
             // Optionally reset connection status if needed, but connection persists
 
-            // Track new conversation/session if applicable?
-            // Actually 'app_opened' is global, 'assistant_started' is overlay.
-            // Maybe 'conversation_started' event?
-            analytics.trackConversationStarted();
         });
         return () => unsubscribe();
     }, []);
+
+    // v2.15.0: listening-again indicator. When the rolling auto-answer
+    // is cancelled mid-stream (interviewer resumed), swap the "thinking…"
+    // state for a quiet "listening…" state until the next UtteranceEnd
+    // re-fires the run. Auto-clears on the next incoming assistant
+    // message, on session reset, or after 15s as a safety net.
+    const [isListeningAgain, setIsListeningAgain] = useState(false);
+    useEffect(() => {
+        if (!window.electronAPI?.onRollingStreamCancelled) return;
+        const unsubscribe = window.electronAPI.onRollingStreamCancelled(() => {
+            setIsProcessing(false);
+            setIsListeningAgain(true);
+        });
+        return () => unsubscribe();
+    }, []);
+    useEffect(() => {
+        if (!isListeningAgain) return;
+        const t = setTimeout(() => setIsListeningAgain(false), 15_000);
+        return () => clearTimeout(t);
+    }, [isListeningAgain]);
+    useEffect(() => {
+        // Any new assistant message clears the "listening…" chip.
+        if (messages.some(m => m.role === 'system')) {
+            setIsListeningAgain(false);
+        }
+    }, [messages]);
 
 
     const handleScreenshotAttach = (data: { path: string; preview: string }) => {
@@ -403,6 +565,14 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
         cleanups.push(window.electronAPI.onNativeAudioDisconnected(() => {
             setIsConnected(false);
         }));
+
+        // M6-A v2.6.0: Live Coding capture state. Broadcast on start/stop.
+        window.electronAPI?.getLiveScreenCaptureRunning?.().then(setLiveCaptureRunning).catch(() => { });
+        if (window.electronAPI?.onLiveScreenCaptureRunning) {
+            cleanups.push(window.electronAPI.onLiveScreenCaptureRunning((running) => {
+                setLiveCaptureRunning(!!running);
+            }));
+        }
 
         // Real-time Transcripts
         cleanups.push(window.electronAPI.onNativeAudioTranscript((transcript) => {
@@ -775,14 +945,12 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
 
     const handleCopy = (text: string) => {
         navigator.clipboard.writeText(text);
-        analytics.trackCopyAnswer();
         // Optional: Trigger a small toast or state change for visual feedback
     };
 
     const handleWhatToSay = async () => {
         setIsExpanded(true);
         setIsProcessing(true);
-        analytics.trackCommandExecuted('what_to_say');
 
         // Capture and clear attached image context.
         // Also merge in any screenshot from the capture-and-process shortcut that
@@ -826,7 +994,6 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
     const handleFollowUp = async (intent: string = 'rephrase') => {
         setIsExpanded(true);
         setIsProcessing(true);
-        analytics.trackCommandExecuted('follow_up_' + intent);
 
         try {
             await window.electronAPI.generateFollowUp(intent);
@@ -841,10 +1008,247 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
         }
     };
 
+    // sensi M7 / MOTION-01: Video / GIF motion capture handlers.
+    // Recording samples 1 frame every 1.5s up to a 20-frame cap (~30s).
+    // Two flows:
+    //   A) Summarize — user records one clip, model summarizes.
+    //   B) Compare — user records clip A, then clip B, model compares side-by-side.
+    const handleMotionStart = async () => {
+        if (motionBusy || motionRecording) return;
+        setMotionBusy(true);
+        try {
+            const res = await window.electronAPI?.motionStart?.();
+            if (res?.ok) {
+                motionMaxFramesRef.current = res.maxFrames ?? 20;
+                setMotionRecording(true);
+                setMotionFrameCount(0);
+                setMotionStartedAt(Date.now());
+            } else {
+                setMessages(prev => [...prev, {
+                    id: Date.now().toString(),
+                    role: 'system',
+                    text: (res as any)?.error ?? 'Could not start motion capture.',
+                }]);
+            }
+        } catch (err: any) {
+            setMessages(prev => [...prev, {
+                id: Date.now().toString(),
+                role: 'system',
+                text: `Motion capture error: ${err?.message ?? err}`,
+            }]);
+        } finally {
+            setMotionBusy(false);
+        }
+    };
+
+    const handleMotionStop = async () => {
+        if (motionBusy || !motionRecording) return;
+        setMotionBusy(true);
+        try {
+            const res = await window.electronAPI?.motionStop?.();
+            setMotionRecording(false);
+            setMotionStartedAt(null);
+            if (res?.ok && Array.isArray(res.frames) && res.frames.length > 0) {
+                if (pendingClipA) {
+                    // Second clip captured — run comparison immediately.
+                    const clipA = pendingClipA;
+                    const clipB = res.frames;
+                    setPendingClipA(null);
+                    setMotionFrameCount(0);
+                    void runMotionCompare(clipA, clipB);
+                } else {
+                    // First / only clip — ask the user what to do with it.
+                    setMotionDecision({ frames: res.frames });
+                    setMotionFrameCount(0);
+                }
+            } else {
+                setMotionFrameCount(0);
+                setMessages(prev => [...prev, {
+                    id: Date.now().toString(),
+                    role: 'system',
+                    text: 'No frames were captured. Try again with a longer recording.',
+                }]);
+            }
+        } catch (err: any) {
+            setMotionRecording(false);
+            setMessages(prev => [...prev, {
+                id: Date.now().toString(),
+                role: 'system',
+                text: `Motion stop failed: ${err?.message ?? err}`,
+            }]);
+        } finally {
+            setMotionBusy(false);
+        }
+    };
+
+    const runMotionSummarize = async (frames: string[]) => {
+        setIsExpanded(true);
+        setIsProcessing(true);
+        const userId = Date.now().toString();
+        setMessages(prev => [...prev, {
+            id: userId,
+            role: 'user',
+            text: `Summarize the recorded clip (${frames.length} frames).`,
+        }]);
+        setTimeout(() => { messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, 50);
+        try {
+            const res = await window.electronAPI?.motionSummarize?.(frames);
+            if (res?.success && res.brief) {
+                setMessages(prev => [...prev, {
+                    id: `${userId}-brief`,
+                    role: 'system',
+                    text: res.brief!,
+                }]);
+            } else {
+                setMessages(prev => [...prev, {
+                    id: `${userId}-err`,
+                    role: 'system',
+                    text: res?.error ?? 'Video summary failed.',
+                }]);
+            }
+        } catch (err: any) {
+            setMessages(prev => [...prev, {
+                id: `${userId}-err`,
+                role: 'system',
+                text: `Video summary error: ${err?.message ?? err}`,
+            }]);
+        } finally {
+            // Clean up frame files — they've been sent to the model and
+            // rendered into chat. No reason to keep them on disk.
+            void window.electronAPI?.motionDiscard?.(frames);
+            setIsProcessing(false);
+            setTimeout(() => { messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, 50);
+        }
+    };
+
+    const runMotionCompare = async (clipA: string[], clipB: string[]) => {
+        setIsExpanded(true);
+        setIsProcessing(true);
+        const userId = Date.now().toString();
+        setMessages(prev => [...prev, {
+            id: userId,
+            role: 'user',
+            text: `Compare the two recorded clips (A: ${clipA.length} frames, B: ${clipB.length} frames).`,
+        }]);
+        setTimeout(() => { messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, 50);
+        try {
+            const res = await window.electronAPI?.motionCompare?.(clipA, clipB);
+            if (res?.success && res.brief) {
+                setMessages(prev => [...prev, {
+                    id: `${userId}-brief`,
+                    role: 'system',
+                    text: res.brief!,
+                }]);
+            } else {
+                setMessages(prev => [...prev, {
+                    id: `${userId}-err`,
+                    role: 'system',
+                    text: res?.error ?? 'Clip comparison failed.',
+                }]);
+            }
+        } catch (err: any) {
+            setMessages(prev => [...prev, {
+                id: `${userId}-err`,
+                role: 'system',
+                text: `Compare error: ${err?.message ?? err}`,
+            }]);
+        } finally {
+            void window.electronAPI?.motionDiscard?.([...clipA, ...clipB]);
+            setIsProcessing(false);
+            setTimeout(() => { messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, 50);
+        }
+    };
+
+    const handleMotionDecisionSummarize = () => {
+        if (!motionDecision) return;
+        const { frames } = motionDecision;
+        setMotionDecision(null);
+        void runMotionSummarize(frames);
+    };
+
+    const handleMotionDecisionCompare = async () => {
+        if (!motionDecision) return;
+        const { frames } = motionDecision;
+        setPendingClipA(frames);
+        setMotionDecision(null);
+        setMessages(prev => [...prev, {
+            id: Date.now().toString(),
+            role: 'system',
+            text: '📹 Clip A captured. Now play the second clip and tap Record again to capture Clip B — then sensi will compare them.',
+        }]);
+        setTimeout(() => { messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, 50);
+    };
+
+    const handleMotionDecisionDiscard = async () => {
+        if (!motionDecision) return;
+        const { frames } = motionDecision;
+        setMotionDecision(null);
+        await window.electronAPI?.motionDiscard?.(frames);
+    };
+
+    // sensi M7 / RESEARCH-01: standalone research (Tavily -> LLM brief).
+    // Runs independent of persona/JD so the user can look up any company
+    // or topic from the overlay without any setup.
+    const handleResearchSubmit = async () => {
+        const query = researchQuery.trim();
+        if (!query || researchLoading) return;
+
+        setIsExpanded(true);
+        setShowResearchInput(false);
+        setResearchLoading(true);
+        setIsProcessing(true);
+
+        const userMessageId = Date.now().toString();
+        setMessages(prev => [...prev, {
+            id: userMessageId,
+            role: 'user',
+            text: `Research: ${query}`,
+        }]);
+        setTimeout(() => {
+            messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+        }, 50);
+
+        try {
+            const result = await window.electronAPI?.researchRun?.(query, 'general');
+            if (result?.success && result.brief) {
+                const sourceLines = (result.sources ?? [])
+                    .slice(0, 5)
+                    .map(s => `- [${s.title || s.url}](${s.url})`)
+                    .join('\n');
+                const briefWithSources = sourceLines
+                    ? `${result.brief}\n\n### Sources\n${sourceLines}`
+                    : result.brief;
+                setMessages(prev => [...prev, {
+                    id: `${userMessageId}-brief`,
+                    role: 'system',
+                    text: briefWithSources,
+                }]);
+            } else {
+                setMessages(prev => [...prev, {
+                    id: `${userMessageId}-err`,
+                    role: 'system',
+                    text: result?.error ?? 'Research failed. Please try again.',
+                }]);
+            }
+        } catch (err: any) {
+            setMessages(prev => [...prev, {
+                id: `${userMessageId}-err`,
+                role: 'system',
+                text: `Research error: ${err?.message ?? err}`,
+            }]);
+        } finally {
+            setResearchLoading(false);
+            setIsProcessing(false);
+            setResearchQuery('');
+            setTimeout(() => {
+                messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+            }, 50);
+        }
+    };
+
     const handleRecap = async () => {
         setIsExpanded(true);
         setIsProcessing(true);
-        analytics.trackCommandExecuted('recap');
 
         try {
             await window.electronAPI.generateRecap();
@@ -862,7 +1266,6 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
     const handleFollowUpQuestions = async () => {
         setIsExpanded(true);
         setIsProcessing(true);
-        analytics.trackCommandExecuted('suggest_questions');
 
         try {
             await window.electronAPI.generateFollowUpQuestions();
@@ -880,7 +1283,6 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
     const handleClarify = async () => {
         setIsExpanded(true);
         setIsProcessing(true);
-        analytics.trackCommandExecuted('clarify');
 
         try {
             await window.electronAPI.generateClarify();
@@ -898,7 +1300,6 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
     const handleCodeHint = async () => {
         setIsExpanded(true);
         setIsProcessing(true);
-        analytics.trackCommandExecuted('code_hint');
 
         const currentAttachments = attachedContext;
         if (currentAttachments.length > 0) {
@@ -933,7 +1334,6 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
     const handleBrainstorm = async () => {
         setIsExpanded(true);
         setIsProcessing(true);
-        analytics.trackCommandExecuted('brainstorm');
 
         const currentAttachments = attachedContext;
         if (currentAttachments.length > 0) {
@@ -992,6 +1392,37 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
                     });
                     return; // Skip the normal append below
                 }
+                // v2.16.0: Sensi managed AI daily cap — render an inline
+                // "Upgrade / Use my own key" pill in place of the streaming
+                // bubble.
+                if (parsed?.__managedDailyCap) {
+                    const { kind, used, cap } = parsed.__managedDailyCap;
+                    const capText = `Daily ${kind} cap reached (${used}/${cap}).`;
+                    setMessages(prev => {
+                        const lastMsg = prev[prev.length - 1];
+                        const body = `${capText} Upgrade to Pro for unlimited, or use your own key in Settings → AI Providers.`;
+                        if (lastMsg && lastMsg.isStreaming && lastMsg.role === 'system') {
+                            const updated = [...prev];
+                            updated[prev.length - 1] = { ...lastMsg, text: body, isStreaming: false };
+                            return updated;
+                        }
+                        return prev;
+                    });
+                    return;
+                }
+                if (parsed?.__managedAIDisabled) {
+                    setMessages(prev => {
+                        const lastMsg = prev[prev.length - 1];
+                        const body = 'Sensi AI is temporarily unavailable. Use your own key in Settings → AI Providers.';
+                        if (lastMsg && lastMsg.isStreaming && lastMsg.role === 'system') {
+                            const updated = [...prev];
+                            updated[prev.length - 1] = { ...lastMsg, text: body, isStreaming: false };
+                            return updated;
+                        }
+                        return prev;
+                    });
+                    return;
+                }
             } catch {
                 // Not JSON — normal text token, fall through to the standard append.
             }
@@ -1016,19 +1447,10 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
         cleanups.push(window.electronAPI.onGeminiStreamDone(() => {
             setIsProcessing(false);
 
-            // Calculate latency if we have a start time
-            let latency = 0;
+            // Reset the per-request latency start marker.
             if (requestStartTimeRef.current) {
-                latency = Date.now() - requestStartTimeRef.current;
                 requestStartTimeRef.current = null;
             }
-
-            // Track Usage
-            analytics.trackModelUsed({
-                model_name: currentModel,
-                provider_type: detectProviderType(currentModel),
-                latency_ms: latency
-            });
 
             setMessages(prev => {
                 const lastMsg = prev[prev.length - 1];
@@ -1187,7 +1609,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
             setManualTranscript('');  // Clear live preview
 
             // Send manual finalization signal to STT Providers
-            window.electronAPI.finalizeMicSTT().catch(err => console.error('[NativelyInterface] Failed to send finalizeMicSTT:', err));
+            window.electronAPI.finalizeMicSTT().catch(err => console.error('[SensiInterface] Failed to send finalizeMicSTT:', err));
 
             const currentAttachments = attachedContext;
             setAttachedContext([]); // Clear context immediately on send
@@ -1199,11 +1621,15 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
             manualTranscriptRef.current = '';
 
             if (!question && currentAttachments.length === 0) {
-                // No voice input and no image
+                // No voice input AND no image. Most common causes (in order):
+                //   1. Headset mute button engaged (Jabra/Poly have physical buttons)
+                //   2. Wrong mic selected in Settings → Audio → Input Device
+                //   3. Windows input level set very low for the selected device
+                //   4. STT provider silently failing (check sensi_debug.log)
                 setMessages(prev => [...prev, {
                     id: Date.now().toString(),
                     role: 'system',
-                    text: '⚠️ No speech detected. Try speaking closer to your microphone.'
+                    text: '⚠️ No speech detected. Check: (1) your headset mute button, (2) the selected Input Device in Settings → Audio, and (3) Windows mic input level. Try Settings → Audio to test the mic.'
                 }]);
                 return;
             }
@@ -1386,7 +1812,32 @@ Provide only the answer, nothing else.`;
 
 
 
+    // PERF-02 (v2.17.0): cache rendered JSX per message. Non-streaming messages
+    // are stable across token deliveries; only the tail streaming message
+    // actually needs to re-render per token. Keyed by (msg.id, msg.text,
+    // msg.isStreaming). Invalidated when theme/appearance/mode changes below.
+    const renderedMessageCacheRef = useRef<Map<string, { key: string; jsx: React.ReactNode }>>(new Map());
+    useEffect(() => {
+        renderedMessageCacheRef.current.clear();
+    }, [isLightTheme, appearance, actionButtonMode]);
+
     const renderMessageText = (msg: Message) => {
+        // Skip cache for negotiation coaching (stateful timer) and still-streaming
+        // messages (content is changing by definition).
+        const canCache = !msg.isNegotiationCoaching && !msg.isStreaming;
+        const cacheKey = `${msg.text ?? ''}::${msg.intent ?? ''}::${msg.isCode ? 'c' : 'p'}`;
+        if (canCache) {
+            const cached = renderedMessageCacheRef.current.get(msg.id);
+            if (cached && cached.key === cacheKey) return cached.jsx;
+        }
+        const jsx = renderMessageTextUncached(msg);
+        if (canCache) {
+            renderedMessageCacheRef.current.set(msg.id, { key: cacheKey, jsx });
+        }
+        return jsx;
+    };
+
+    const renderMessageTextUncached = (msg: Message) => {
         // Negotiation coaching card takes priority
         if (msg.isNegotiationCoaching && msg.negotiationCoachingData) {
             return (
@@ -1947,6 +2398,23 @@ Provide only the answer, nothing else.`;
                             appearance={appearance}
                             onLogoClick={() => window.electronAPI?.setWindowMode?.('launcher')}
                         />
+                        {/* v2.6.2 LIVE CODING chip — always visible when Live Coding capture is
+                            running so the user knows sensi is sampling their screen every ~12 s.
+                            Clicking opens Settings so the user can disable it. Explicit
+                            "Live Coding" text (not just "Live") so the feature is unambiguous. */}
+                        {liveCaptureRunning && (
+                            <button
+                                onClick={() => window.electronAPI?.toggleSettingsWindow?.()}
+                                title="Live Coding mode is capturing frames every ~12s. Click to open Settings."
+                                className="no-drag flex items-center gap-1.5 px-3 py-1 rounded-full border border-[var(--accent-primary)]/30 bg-[var(--accent-primary)]/[0.08] text-[9.5px] font-bold uppercase tracking-[0.18em] text-[var(--accent-primary)] hover:bg-[var(--accent-primary)]/[0.14] transition-colors"
+                            >
+                                <span className="relative flex items-center justify-center w-1.5 h-1.5">
+                                    <span className="absolute inset-0 rounded-full bg-[var(--accent-primary)] opacity-40 animate-ping" />
+                                    <span className="relative w-1 h-1 rounded-full bg-[var(--accent-primary)]" />
+                                </span>
+                                Live Coding
+                            </button>
+                        )}
                         <div
                             className={`relative w-[600px] max-w-full backdrop-blur-2xl border rounded-[24px] overflow-hidden flex flex-col draggable-area overlay-shell-surface ${overlayPanelClass}`}
                             style={appearance.shellStyle}
@@ -2001,7 +2469,13 @@ Provide only the answer, nothing else.`;
                                             <span>Transcription Not Configured</span>
                                         </div>
                                         <p className="text-[11px] text-orange-600/70 dark:text-orange-400/60 leading-snug pl-[26px]">
-                                            No STT provider selected. Open Settings → Audio to pick one.
+                                            No STT provider selected. Open Settings → Audio, then paste a{' '}
+                                            {/* sensi M2-T1: direct Deepgram console link — recommended provider */}
+                                            <button
+                                                onClick={() => window.electronAPI?.openExternal?.('https://console.deepgram.com')}
+                                                className="underline hover:text-orange-700 dark:hover:text-orange-300"
+                                            >Deepgram API key</button>
+                                            {' '}(recommended).
                                         </p>
                                     </div>
                                     <div className="flex items-center gap-2 shrink-0">
@@ -2022,12 +2496,15 @@ Provide only the answer, nothing else.`;
                                 </div>
                             )}
 
-                            {/* Rolling Transcript Bar - Single-line interviewer speech */}
+                            {/* Rolling Transcript Bar — shows the other party's live speech.
+                                v2.6.1: label reads "Interviewer" only when Interview Mode is on;
+                                otherwise generic "Speaker". */}
                             {(rollingTranscript || isInterviewerSpeaking) && showTranscript && (
                                 <RollingTranscript
                                     text={rollingTranscript}
                                     isActive={isInterviewerSpeaking}
                                     surfaceStyle={appearance.transcriptStyle}
+                                    speakerLabel={actionButtonMode === 'brainstorm' ? 'Interviewer' : 'Speaker'}
                                 />
                             )}
 
@@ -2035,13 +2512,13 @@ Provide only the answer, nothing else.`;
                             {(messages.length > 0 || isManualRecording || isProcessing) && (
                                 <div ref={scrollContainerRef} className="flex-1 overflow-y-auto p-4 space-y-3 max-h-[clamp(300px,35vh,450px)] no-drag" style={{ scrollbarWidth: 'none' }}>
                                     {messages.map((msg) => (
-                                        <div key={msg.id} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'} animate-fade-in-up`}>
+                                        <div key={msg.id} data-message-id={msg.id} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'} animate-fade-in-up`}>
                                             <div className={`
                       ${msg.role === 'user' ? 'max-w-[72.25%] px-[13.6px] py-[10.2px]' : 'max-w-[85%] px-4 py-3'} text-[14px] leading-relaxed relative group whitespace-pre-wrap
                       ${msg.role === 'user'
                                                     ? (isLightTheme
-                                                        ? 'bg-blue-500/10 backdrop-blur-md border border-blue-500/20 text-blue-900 rounded-[20px] rounded-tr-[4px] shadow-sm font-medium'
-                                                        : 'bg-blue-600/20 backdrop-blur-md border border-blue-500/30 text-blue-100 rounded-[20px] rounded-tr-[4px] shadow-sm font-medium')
+                                                        ? 'bg-[var(--accent-muted)] backdrop-blur-md border border-[var(--accent-primary)]/25 text-[#5D4424] rounded-[16px] rounded-tr-[4px] shadow-sm font-medium'
+                                                        : 'bg-[var(--accent-muted)] backdrop-blur-md border border-[var(--accent-primary)]/30 text-[#EBD9B8] rounded-[16px] rounded-tr-[4px] shadow-sm font-medium')
                                                     : ''
                                                 }
                       ${msg.role === 'system'
@@ -2049,14 +2526,19 @@ Provide only the answer, nothing else.`;
                                                     : ''
                                                 }
                       ${msg.role === 'interviewer'
-                                                    ? 'overlay-text-muted italic pl-0 text-[13px]'
+                                                    ? 'overlay-text-secondary pl-0 text-[13.5px] leading-[1.45] max-w-[92%]'
                                                     : ''
                                                 }
                     `}>
                                                 {msg.role === 'interviewer' && (
-                                                    <div className="flex items-center gap-1.5 mb-1 text-[10px] font-medium uppercase tracking-wider overlay-text-muted">
-                                                        Interviewer
-                                                        {msg.isStreaming && <span className="w-1 h-1 bg-green-500 rounded-full animate-pulse" />}
+                                                    <div className="flex items-center gap-2 mb-1.5 text-[10.5px] font-bold uppercase tracking-[0.14em] overlay-text-muted">
+                                                        <span>{actionButtonMode === 'brainstorm' ? 'Interviewer' : 'Speaker'}</span>
+                                                        {msg.isStreaming && (
+                                                            <span className="relative flex items-center justify-center w-1.5 h-1.5">
+                                                                <span className="absolute inset-0 rounded-full bg-emerald-500/40 animate-ping" />
+                                                                <span className="relative w-1 h-1 rounded-full bg-emerald-500" />
+                                                            </span>
+                                                        )}
                                                     </div>
                                                 )}
                                                 {msg.role === 'user' && msg.hasScreenshot && (
@@ -2080,36 +2562,160 @@ Provide only the answer, nothing else.`;
                                         </div>
                                     ))}
 
-                                    {/* Active Recording State with Live Transcription */}
-                                    {isManualRecording && (
-                                        <div className="flex flex-col items-end gap-1 animate-in fade-in slide-in-from-bottom-2 duration-300">
-                                            {/* Live transcription preview */}
-                                            {(manualTranscript || voiceInput) && (
-                                                <div className="max-w-[85%] px-3.5 py-2.5 bg-emerald-500/10 border border-emerald-500/20 rounded-[18px] rounded-tr-[4px]">
-                                                    <span className="text-[13px] text-emerald-300">
-                                                        {voiceInput}{voiceInput && manualTranscript ? ' ' : ''}{manualTranscript}
-                                                    </span>
-                                                </div>
-                                            )}
+                                    {isProcessing && (
+                                        <div className="flex justify-start">
                                             <div className="px-3 py-2 flex gap-1.5 items-center">
-                                                <div className="w-2 h-2 bg-emerald-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
-                                                <div className="w-2 h-2 bg-emerald-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
-                                                <div className="w-2 h-2 bg-emerald-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
-                                                <span className="text-[10px] text-emerald-400/70 ml-1">Listening...</span>
+                                                <div className="w-1.5 h-1.5 bg-emerald-400/70 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+                                                <div className="w-1.5 h-1.5 bg-emerald-400/70 rounded-full animate-bounce" style={{ animationDelay: '120ms' }} />
+                                                <div className="w-1.5 h-1.5 bg-emerald-400/70 rounded-full animate-bounce" style={{ animationDelay: '240ms' }} />
+                                                <span className="text-[10.5px] font-bold uppercase tracking-[0.14em] ml-1 overlay-text-muted">Thinking</span>
                                             </div>
                                         </div>
                                     )}
-
-                                    {isProcessing && (
+                                    {/* v2.15.0: cancel-on-speech indicator. When the auto-answer
+                                        stream was aborted because the interviewer resumed speaking,
+                                        show a quiet "listening…" chip until the next turn-end
+                                        re-fires. Auto-clears on next answer or 15s timeout. */}
+                                    {!isProcessing && isListeningAgain && (
                                         <div className="flex justify-start">
-                                            <div className="px-3 py-2 flex gap-1.5">
-                                                <div className="w-2 h-2 bg-slate-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
-                                                <div className="w-2 h-2 bg-slate-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
-                                                <div className="w-2 h-2 bg-slate-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+                                            <div className="px-3 py-2 flex gap-1.5 items-center">
+                                                <div className="w-1.5 h-1.5 bg-amber-400/70 rounded-full animate-pulse" />
+                                                <span className="text-[10.5px] font-bold uppercase tracking-[0.14em] ml-1 overlay-text-muted">Listening</span>
                                             </div>
                                         </div>
                                     )}
                                     <div ref={messagesEndRef} />
+                                </div>
+                            )}
+
+                            {/* v2.4.11: Active Recording UI — pinned OUTSIDE the scrollable messages list
+                                so the live voice transcript + Listening indicator are always fully visible
+                                regardless of scroll position or message history length. */}
+                            {isManualRecording && (
+                                <div className="mx-4 mb-2 mt-1 no-drag flex flex-col items-end gap-1 animate-in fade-in slide-in-from-bottom-2 duration-200">
+                                    {(manualTranscript || voiceInput) && (
+                                        <div className="max-w-full px-3.5 py-2.5 bg-emerald-500/10 border border-emerald-500/25 rounded-[16px] rounded-tr-[4px] shadow-[0_2px_12px_-4px_rgba(16,185,129,0.2)]">
+                                            <span className="text-[13px] leading-relaxed text-emerald-300 whitespace-pre-wrap break-words">
+                                                {voiceInput}{voiceInput && manualTranscript ? ' ' : ''}{manualTranscript}
+                                            </span>
+                                        </div>
+                                    )}
+                                    <div className="px-3 py-1.5 flex gap-1.5 items-center">
+                                        <div className="w-1.5 h-1.5 bg-emerald-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+                                        <div className="w-1.5 h-1.5 bg-emerald-400 rounded-full animate-bounce" style={{ animationDelay: '120ms' }} />
+                                        <div className="w-1.5 h-1.5 bg-emerald-400 rounded-full animate-bounce" style={{ animationDelay: '240ms' }} />
+                                        <span className="text-[10.5px] font-bold uppercase tracking-[0.14em] ml-1 text-emerald-400/80">Listening</span>
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* sensi M7 / MOTION-01: post-stop decision popover.
+                                After a clip is captured, the user picks Summarize vs.
+                                Compare-with-another-clip vs. Discard. */}
+                            {motionDecision && (
+                                <div className="mx-4 mb-2 no-drag">
+                                    <div className={`px-3 py-2.5 rounded-lg border ${subtleSurfaceClass}`} style={appearance.subtleStyle}>
+                                        <div className="flex items-center gap-2 mb-2">
+                                            <Video className="w-3.5 h-3.5 opacity-70 shrink-0" />
+                                            <span className="text-[11.5px] font-medium overlay-text-primary">
+                                                Clip captured ({motionDecision.frames.length} frame{motionDecision.frames.length === 1 ? '' : 's'})
+                                            </span>
+                                        </div>
+                                        <div className="flex flex-wrap items-center gap-1.5">
+                                            <button
+                                                onClick={handleMotionDecisionSummarize}
+                                                className="text-[10.5px] font-medium px-2.5 py-1 rounded-full bg-emerald-500/15 text-emerald-400 border border-emerald-500/25 hover:bg-emerald-500/25 transition-colors"
+                                            >
+                                                <Sparkles className="w-3 h-3 inline mr-1 opacity-70" />
+                                                Summarize
+                                            </button>
+                                            <button
+                                                onClick={handleMotionDecisionCompare}
+                                                className="text-[10.5px] font-medium px-2.5 py-1 rounded-full bg-amber-500/15 text-amber-400 border border-amber-500/25 hover:bg-amber-500/25 transition-colors"
+                                            >
+                                                <GitCompare className="w-3 h-3 inline mr-1 opacity-70" />
+                                                Compare with next clip
+                                            </button>
+                                            <button
+                                                onClick={handleMotionDecisionDiscard}
+                                                className="text-[10.5px] font-medium px-2.5 py-1 rounded-full text-text-tertiary hover:text-red-400 transition-colors ml-auto"
+                                                title="Discard clip"
+                                            >
+                                                Discard
+                                            </button>
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* sensi M7 / MOTION-01: pending-comparison hint.
+                                Shown after the user picks "Compare with next clip" —
+                                tells them to record Clip B and what will happen. */}
+                            {pendingClipA && !motionRecording && !motionDecision && (
+                                <div className="mx-4 mb-2 no-drag">
+                                    <div className="px-3 py-2 rounded-lg border border-amber-500/25 bg-amber-500/10">
+                                        <div className="flex items-center gap-2">
+                                            <GitCompare className="w-3 h-3 text-amber-400 shrink-0" />
+                                            <span className="text-[11px] text-amber-300 flex-1">
+                                                Clip A saved ({pendingClipA.length} frames). Tap Record to capture Clip B.
+                                            </span>
+                                            <button
+                                                onClick={async () => {
+                                                    const a = pendingClipA;
+                                                    setPendingClipA(null);
+                                                    if (a) await window.electronAPI?.motionDiscard?.(a);
+                                                }}
+                                                className="text-[10px] text-text-tertiary hover:text-red-400 transition-colors shrink-0"
+                                                title="Cancel comparison"
+                                            >
+                                                Cancel
+                                            </button>
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* sensi M7 / RESEARCH-01: Research query input.
+                                Appears inline when the user taps the Research chip.
+                                Submitting fires the research:run IPC and pushes the
+                                brief back into the chat as a system message. */}
+                            {showResearchInput && (
+                                <div className="mx-4 mb-2 no-drag">
+                                    <div className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-full border ${subtleSurfaceClass}`} style={appearance.subtleStyle}>
+                                        <Search className="w-3 h-3 opacity-60 shrink-0" />
+                                        <input
+                                            ref={researchInputRef}
+                                            type="text"
+                                            value={researchQuery}
+                                            onChange={(e) => setResearchQuery(e.target.value)}
+                                            onKeyDown={(e) => {
+                                                if (e.key === 'Enter') {
+                                                    e.preventDefault();
+                                                    handleResearchSubmit();
+                                                } else if (e.key === 'Escape') {
+                                                    setShowResearchInput(false);
+                                                    setResearchQuery('');
+                                                }
+                                            }}
+                                            placeholder="Company, role, or topic"
+                                            disabled={researchLoading}
+                                            className="flex-1 bg-transparent outline-none text-[11px] placeholder:opacity-50 overlay-text-primary min-w-0"
+                                        />
+                                        <button
+                                            onClick={handleResearchSubmit}
+                                            disabled={researchLoading || !researchQuery.trim()}
+                                            className="text-[10.5px] font-medium px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400 border border-emerald-500/25 hover:bg-emerald-500/25 disabled:opacity-40 disabled:cursor-not-allowed transition-colors shrink-0"
+                                        >
+                                            {researchLoading ? 'Searching…' : 'Go'}
+                                        </button>
+                                        <button
+                                            onClick={() => { setShowResearchInput(false); setResearchQuery(''); }}
+                                            className="p-0.5 rounded-full opacity-60 hover:opacity-100 transition-opacity shrink-0"
+                                            title="Close"
+                                        >
+                                            <X className="w-3 h-3" />
+                                        </button>
+                                    </div>
                                 </div>
                             )}
 
@@ -2128,13 +2734,69 @@ Provide only the answer, nothing else.`;
                                     }
                                 </button>
                                 <button onClick={handleFollowUpQuestions} className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[11px] font-medium border transition-all active:scale-95 duration-200 interaction-base interaction-press whitespace-nowrap shrink-0 ${quickActionClass}`} style={appearance.chipStyle}>
-                                    <HelpCircle className="w-3 h-3 opacity-70" /> Follow Up Question
+                                    <HelpCircle className="w-3 h-3 opacity-70" /> Follow Up
+                                </button>
+                                {/* sensi M7 / RESEARCH-01: standalone Tavily research chip.
+                                    Icon-only to keep the 6-chip row inside the overlay width. */}
+                                <button
+                                    onClick={() => {
+                                        setShowResearchInput(prev => {
+                                            const next = !prev;
+                                            if (next) {
+                                                setTimeout(() => researchInputRef.current?.focus(), 50);
+                                            }
+                                            return next;
+                                        });
+                                    }}
+                                    aria-label="Research a company, role, or topic"
+                                    className={`flex items-center justify-center px-2 py-1.5 rounded-full text-[11px] font-medium border transition-all active:scale-95 duration-200 interaction-base interaction-press whitespace-nowrap shrink-0 ${quickActionClass}`}
+                                    style={appearance.chipStyle}
+                                    title="Research a company, role, or topic (requires Tavily API key)"
+                                >
+                                    <Search className="w-3 h-3 opacity-70" />
+                                </button>
+                                {/* sensi M7 / MOTION-01: Record chip. Tap to start/stop
+                                    capturing frames (~1.5s interval, 20-frame cap).
+                                    Icon flips between Video (idle) and red Square + timer
+                                    (recording). Tap while recording → stop → decision popover. */}
+                                <button
+                                    onClick={() => {
+                                        if (motionRecording) void handleMotionStop();
+                                        else void handleMotionStart();
+                                    }}
+                                    disabled={motionBusy || !!motionDecision}
+                                    aria-label={motionRecording ? 'Stop recording' : 'Start recording a video/GIF clip'}
+                                    className={`flex items-center justify-center gap-1 px-2 py-1.5 rounded-full text-[11px] font-medium border transition-all active:scale-95 duration-200 interaction-base interaction-press whitespace-nowrap shrink-0 ${motionRecording
+                                        ? 'bg-red-500/10 text-red-400 ring-1 ring-red-500/20 border-red-500/20'
+                                        : quickActionClass
+                                        }`}
+                                    style={motionRecording ? undefined : appearance.chipStyle}
+                                    title={motionRecording
+                                        ? 'Recording — tap to stop'
+                                        : pendingClipA
+                                            ? 'Record Clip B for comparison'
+                                            : 'Record a video / GIF clip for summary or comparison'}
+                                >
+                                    {motionRecording ? (
+                                        <>
+                                            <Square className="w-2.5 h-2.5 fill-current" />
+                                            <span className="tabular-nums">
+                                                {motionFrameCount}/{motionMaxFramesRef.current}
+                                            </span>
+                                        </>
+                                    ) : pendingClipA ? (
+                                        <GitCompare className="w-3 h-3 opacity-70" />
+                                    ) : (
+                                        <Video className="w-3 h-3 opacity-70" />
+                                    )}
+                                    {/* Suppress unused-motion-tick warning — effect re-renders via motionTick. */}
+                                    <span className="sr-only">{motionTick}</span>
                                 </button>
                                 <button
                                     onClick={handleAnswerNow}
-                                    className={`flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-full text-[11px] font-medium transition-all active:scale-95 duration-200 interaction-base interaction-press min-w-[74px] whitespace-nowrap shrink-0 ${isManualRecording
-                                        ? 'bg-red-500/10 text-red-400 ring-1 ring-red-500/20'
-                                        : 'overlay-chip-surface overlay-text-interactive hover:text-emerald-500 hover:bg-emerald-500/10'
+                                    className={`flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-full text-[11px] font-medium border transition-all active:scale-95 duration-200 interaction-base interaction-press min-w-[74px] whitespace-nowrap shrink-0 ${isManualRecording
+                                        ? 'bg-red-500/10 text-red-400 ring-1 ring-red-500/20 border-red-500/20'
+                                        : quickActionClass
                                         }`}
                                     style={isManualRecording ? undefined : appearance.chipStyle}
                                 >
@@ -2251,14 +2913,29 @@ Provide only the answer, nothing else.`;
                                         >
                                             <span className="truncate min-w-0 flex-1">
                                                 {(() => {
+                                                    // sensi M1 Step 4: provider · model header pill.
+                                                    // Loading → "Loading…"; no provider yet → "No provider".
+                                                    if (!providerPairLoaded) return 'Loading…';
+                                                    if (!currentProvider && !currentModel) return 'No provider';
+                                                    const PROVIDER_LABELS: Record<string, string> = {
+                                                        minimax: 'MiniMax',
+                                                        gemini:  'Gemini',
+                                                        claude:  'Claude',
+                                                        openai:  'OpenAI',
+                                                        groq:    'Groq',
+                                                        ollama:  'Ollama',
+                                                    };
                                                     const m = currentModel;
-                                                    if (m.startsWith('ollama-')) return m.replace('ollama-', '');
-                                                    if (m === 'gemini-3.1-flash-lite-preview') return 'Gemini 3.1 Flash';
-                                                    if (m === 'gemini-3.1-pro-preview') return 'Gemini 3.1 Pro';
-                                                    if (m === 'llama-3.3-70b-versatile') return 'Groq Llama 3.3';
-                                                    if (m === 'gpt-5.4') return 'GPT 5.4';
-                                                    if (m === 'claude-sonnet-4-6') return 'Sonnet 4.6';
-                                                    return m;
+                                                    let modelLabel = m;
+                                                    if (m.startsWith('ollama-')) modelLabel = m.replace('ollama-', '');
+                                                    else if (m.startsWith('MiniMax-')) modelLabel = m.replace('MiniMax-', 'M').replace('-highspeed', ' fast');
+                                                    else if (m === 'gemini-3.1-flash-lite-preview') modelLabel = '3.1 Flash';
+                                                    else if (m === 'gemini-3.1-pro-preview') modelLabel = '3.1 Pro';
+                                                    else if (m === 'llama-3.3-70b-versatile') modelLabel = 'Llama 3.3';
+                                                    else if (m === 'gpt-5.4') modelLabel = 'GPT 5.4';
+                                                    else if (m === 'claude-sonnet-4-6') modelLabel = 'Sonnet 4.6';
+                                                    const providerLabel = currentProvider ? PROVIDER_LABELS[currentProvider] : '';
+                                                    return providerLabel ? `${providerLabel} · ${modelLabel}` : modelLabel;
                                                 })()}
                                             </span>
                                             <ChevronDown size={14} className="shrink-0 transition-transform" />
@@ -2338,7 +3015,7 @@ Provide only the answer, nothing else.`;
                                     w-7 h-7 rounded-full flex items-center justify-center
                                     interaction-base interaction-press
                                     ${inputValue.trim()
-                                                ? 'bg-[#007AFF] text-white shadow-lg shadow-blue-500/20 hover:bg-[#0071E3]'
+                                                ? 'bg-[var(--accent-primary)] text-[#16151A] shadow-lg shadow-[var(--accent-primary)]/20 hover:brightness-110'
                                                 : 'overlay-icon-surface overlay-text-muted cursor-not-allowed'
                                             }
                                 `}
@@ -2356,4 +3033,4 @@ Provide only the answer, nothing else.`;
     );
 };
 
-export default NativelyInterface;
+export default SensiInterface;
