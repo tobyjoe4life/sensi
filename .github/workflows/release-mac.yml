@@ -1,0 +1,86 @@
+name: Release (macOS)
+
+# Builds signed-ad-hoc macOS DMG + ZIP for both Apple Silicon and Intel,
+# then publishes them onto the existing GitHub Release that matches the
+# current package.json version. electron-builder's publish:github flow
+# uploads the Mac assets alongside whatever Windows assets were published
+# earlier for the same version.
+#
+# Triggered manually via the Actions tab or `gh workflow run release-mac.yml`.
+# Ad-hoc signed: end users get "cannot be opened because the developer
+# cannot be verified" on first launch and must right-click → Open once.
+# Swap to full Developer ID signing + notarization by populating the
+# APPLE_* secrets on the repo and flipping `identity: null` in package.json.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Git ref to build (branch, tag, or commit).'
+        required: true
+        default: 'replatform/sensi-minimax'
+  push:
+    tags:
+      - 'v*.*.*'
+
+jobs:
+  build-mac:
+    # macOS 14 runners are Apple Silicon natively; Rust cross-compile to
+    # x86_64 is driven by NATIVELY_BUILD_ALL_MAC_ARCHES=1 in build-native.js.
+    runs-on: macos-14
+    timeout-minutes: 45
+    permissions:
+      contents: write  # electron-builder uploads release assets
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Setup Rust (for native-module)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Install dependencies
+        run: npm ci
+        env:
+          # postinstall compiles better-sqlite3 against Electron ABI for the
+          # host arch; cross-arch compile is handled by electron-builder later.
+          SHARP_IGNORE_GLOBAL_LIBVIPS: '1'
+
+      - name: Build renderer
+        run: npm run build
+
+      - name: Build Electron main process
+        run: npm run build:electron
+
+      - name: Build native Rust module (both arches)
+        run: npm run build:native
+        env:
+          NATIVELY_BUILD_ALL_MAC_ARCHES: '1'
+
+      - name: Package + publish (electron-builder)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Opt in to full-mac-arch packaging inside app:build; if the
+          # script pre-built both Rust binaries above, electron-builder
+          # will now produce x64 + arm64 DMG + ZIP.
+          NATIVELY_BUILD_ALL_MAC_ARCHES: '1'
+          # Ad-hoc signing flow — identity: null in package.json. No Apple
+          # Dev ID cert or notarization creds needed for this release. When
+          # we upgrade, add APPLE_ID / APPLE_APP_SPECIFIC_PASSWORD /
+          # APPLE_TEAM_ID here and flip identity in package.json.
+        run: npx electron-builder --mac --publish always
+
+      - name: Verify assets uploaded
+        run: |
+          ls -lh release/ | head -30
+          echo "Expected: .dmg and .zip for both x64 and arm64 plus latest-mac.yml"
