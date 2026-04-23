@@ -67,20 +67,36 @@ jobs:
         env:
           NATIVELY_BUILD_ALL_MAC_ARCHES: '1'
 
-      - name: Package + publish (electron-builder)
+      - name: Package (electron-builder, no publish)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Opt in to full-mac-arch packaging inside app:build; if the
-          # script pre-built both Rust binaries above, electron-builder
-          # will now produce x64 + arm64 DMG + ZIP.
+          # Opt in to full-mac-arch packaging; the Rust binaries for both
+          # arches were pre-built above.
           NATIVELY_BUILD_ALL_MAC_ARCHES: '1'
           # Ad-hoc signing flow — identity: null in package.json. No Apple
           # Dev ID cert or notarization creds needed for this release. When
           # we upgrade, add APPLE_ID / APPLE_APP_SPECIFIC_PASSWORD /
           # APPLE_TEAM_ID here and flip identity in package.json.
-        run: npx electron-builder --mac --publish always
+        # --publish=never because electron-builder guards against updating
+        # a Release older than 2 h. We upload explicitly below via gh CLI,
+        # which doesn't enforce that guard.
+        run: npx electron-builder --mac --publish never
 
-      - name: Verify assets uploaded
+      - name: Upload ZIPs + latest-mac.yml to existing release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          VERSION=$(node -p "require('./package.json').version")
+          TAG="v$VERSION"
+          echo "Uploading Mac assets to release tag $TAG"
           ls -lh release/ | head -30
-          echo "Expected: .dmg and .zip for both x64 and arm64 plus latest-mac.yml"
+
+          # --clobber overwrites same-name assets so re-runs are idempotent.
+          cd release
+          gh release upload "$TAG" \
+            sensi-${VERSION}-mac.zip \
+            sensi-${VERSION}-mac.zip.blockmap \
+            sensi-${VERSION}-arm64-mac.zip \
+            sensi-${VERSION}-arm64-mac.zip.blockmap \
+            latest-mac.yml \
+            --repo tobyjoe4life/sensi --clobber
