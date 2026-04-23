@@ -1,8 +1,9 @@
 import React, { useState, useEffect } from 'react';
-import { Plus, Trash2, Edit2, AlertCircle, CheckCircle, Save, ChevronDown, Check, RefreshCw, ExternalLink, Loader2 } from 'lucide-react';
+import { Plus, Trash2, Edit2, AlertCircle, CheckCircle, Save, ChevronDown, Check, RefreshCw, ExternalLink, Loader2, Globe, Sparkles } from 'lucide-react';
 import { STANDARD_CLOUD_MODELS, prettifyModelId } from '../../utils/modelUtils';
 import { validateCurl } from '../../lib/curl-validator';
 import { ProviderCard } from './ProviderCard';
+import type { SensiAuthStateIpc } from '../../types/electron';
 
 interface CustomProvider {
     id: string;
@@ -78,17 +79,48 @@ const ModelSelect: React.FC<ModelSelectProps> = ({ value, options, onChange, pla
 };
 
 export const AIProvidersSettings: React.FC = () => {
+    // v2.16.0: sensi-cloud auth state drives the managed-AI card visibility
+    // and action copy. We listen to the broadcast so state stays live when
+    // the user signs in/out from the Account tab.
+    const [authState, setAuthState] = useState<SensiAuthStateIpc | null>(null);
+    const [activeProvider, setActiveProvider] = useState<string | null>(null);
+    const [managedBusy, setManagedBusy] = useState(false);
+    const [managedError, setManagedError] = useState<string | null>(null);
+    useEffect(() => {
+        let mounted = true;
+        window.electronAPI?.authGetState?.().then((res) => {
+            if (!mounted) return;
+            if (res.success) setAuthState(res.state);
+        }).catch(() => { /* noop */ });
+        const unsubscribe = window.electronAPI?.onAuthStateChanged?.((next) => {
+            if (!mounted) return;
+            setAuthState(next);
+        });
+        window.electronAPI?.getActiveProviderAndModel?.()
+            .then((pair) => {
+                if (!mounted) return;
+                if (pair?.provider) setActiveProvider(pair.provider);
+            })
+            .catch(() => { /* noop */ });
+        return () => {
+            mounted = false;
+            if (typeof unsubscribe === 'function') unsubscribe();
+        };
+    }, []);
+
     // --- Standard Providers ---
     const [apiKey, setApiKey] = useState('');
     const [groqApiKey, setGroqApiKey] = useState('');
     const [openaiApiKey, setOpenaiApiKey] = useState('');
     const [claudeApiKey, setClaudeApiKey] = useState('');
+    // sensi M1 Step 3: MiniMax local input state, mirrors the other cloud providers
+    const [minimaxApiKey, setMinimaxApiKey] = useState('');
 
     // Status
     const [savedStatus, setSavedStatus] = useState<Record<string, boolean>>({});
     const [savingStatus, setSavingStatus] = useState<Record<string, boolean>>({});
     const [hasStoredKey, setHasStoredKey] = useState<Record<string, boolean>>({});
-    // Fast mode is available with a local Groq key OR via the Natively API (server-side Groq pool)
+    // Fast mode is available with a local Groq key
     const canUseFastMode = !!(hasStoredKey.groq || hasStoredKey.natively);
     const [testStatus, setTestStatus] = useState<Record<string, 'idle' | 'testing' | 'success' | 'error'>>({});
     const [testError, setTestError] = useState<Record<string, string>>({});
@@ -116,6 +148,14 @@ export const AIProvidersSettings: React.FC = () => {
     // --- Dynamic Model Discovery ---
     const [preferredModels, setPreferredModels] = useState<Record<string, string>>({});
 
+    // --- sensi M7 / RESEARCH-01: Tavily (Search Provider) ---
+    // Moved here from the hidden Profile Intelligence panel so the key is
+    // surfaced as a first-class provider regardless of persona setup.
+    const [tavilyApiKey, setTavilyApiKey] = useState('');
+    const [tavilyError, setTavilyError] = useState('');
+    const [tavilySaving, setTavilySaving] = useState(false);
+    const [hasStoredTavilyKey, setHasStoredTavilyKey] = useState(false);
+
     // Load Initial Data
     useEffect(() => {
         const loadCredentials = async () => {
@@ -132,14 +172,19 @@ export const AIProvidersSettings: React.FC = () => {
                         groq: creds.hasGroqKey,
                         openai: creds.hasOpenaiKey,
                         claude: creds.hasClaudeKey,
-                        natively: creds.hasNativelyKey || false
+                        natively: creds.hasNativelyKey || false,
+                        // sensi M1 Step 3: MiniMax presence flag
+                        minimax: creds.hasMinimaxKey || false,
                     });
+                    setHasStoredTavilyKey(!!creds.hasTavilyKey);
                     // Load preferred models
                     const pm: Record<string, string> = {};
                     if (creds.geminiPreferredModel) pm.gemini = creds.geminiPreferredModel;
                     if (creds.groqPreferredModel) pm.groq = creds.groqPreferredModel;
                     if (creds.openaiPreferredModel) pm.openai = creds.openaiPreferredModel;
                     if (creds.claudePreferredModel) pm.claude = creds.claudePreferredModel;
+                    // sensi M1 Step 3: MiniMax preferred model
+                    if (creds.minimaxPreferredModel) pm.minimax = creds.minimaxPreferredModel;
                     setPreferredModels(pm);
                 }
 
@@ -186,7 +231,7 @@ export const AIProvidersSettings: React.FC = () => {
         }
     }, []);
 
-    // Effect to enforce fast mode disabled if neither Groq key nor Natively API is configured.
+    // Effect to enforce fast mode disabled if no Groq key is configured.
     // Guard with credentialsLoaded so this never fires during the initial async load phase
     // (when hasStoredKey is still empty and canUseFastMode is incorrectly false).
     useEffect(() => {
@@ -284,6 +329,9 @@ export const AIProvidersSettings: React.FC = () => {
             if (provider === 'openai') result = await window.electronAPI.setOpenaiApiKey(key);
             // @ts-ignore
             if (provider === 'claude') result = await window.electronAPI.setClaudeApiKey(key);
+            // sensi M1 Step 3: MiniMax save path
+            // @ts-ignore
+            if (provider === 'minimax') result = await window.electronAPI.setMinimaxApiKey(key);
 
             if (result && result.success) {
                 setSavedStatus(prev => ({ ...prev, [provider]: true }));
@@ -299,7 +347,11 @@ export const AIProvidersSettings: React.FC = () => {
     };
 
     const handleRemoveKey = async (provider: string, setter: (val: string) => void) => {
-        if (!confirm(`Are you sure you want to remove the ${provider} API key?`)) return;
+        // Deliberately no confirm() dialog here — the Electron native confirm
+        // blocks the renderer thread and leaves the underlying input with
+        // ambiguous focus on dismissal, which manifests as "can't click the
+        // next input until I close Settings" on some machines. Removing a
+        // key is reversible (re-paste), so the friction wasn't worth it.
         try {
             let result;
             // @ts-ignore
@@ -310,6 +362,10 @@ export const AIProvidersSettings: React.FC = () => {
             if (provider === 'openai') result = await window.electronAPI.setOpenaiApiKey('');
             // @ts-ignore
             if (provider === 'claude') result = await window.electronAPI.setClaudeApiKey('');
+            // sensi M1 Step 3: MiniMax clear path (passing empty string clears the stored key
+            // and the runtime LLMHelper.minimaxClient via the IPC handler)
+            // @ts-ignore
+            if (provider === 'minimax') result = await window.electronAPI.setMinimaxApiKey('');
 
             if (result && result.success) {
                 setHasStoredKey(prev => ({ ...prev, [provider]: false }));
@@ -349,7 +405,9 @@ export const AIProvidersSettings: React.FC = () => {
             gemini: 'https://aistudio.google.com/app/apikey',
             groq: 'https://console.groq.com/keys',
             openai: 'https://platform.openai.com/api-keys',
-            claude: 'https://console.anthropic.com/settings/keys'
+            claude: 'https://console.anthropic.com/settings/keys',
+            // sensi M1 Step 3: MiniMax key console (verified 2026-04-13)
+            minimax: 'https://platform.minimax.io/user-center/basic-information/interface-key',
         };
         // @ts-ignore
         window.electronAPI?.openExternal(urls[provider]);
@@ -414,7 +472,8 @@ export const AIProvidersSettings: React.FC = () => {
     };
 
     const handleDeleteCustom = async (id: string) => {
-        if (!confirm("Are you sure you want to delete this provider?")) return;
+        // No confirm() — native dialog steals focus from the settings panel.
+        // Delete is immediate; user re-adds the provider if this was a mistake.
         try {
             // @ts-ignore
             const result = await window.electronAPI.deleteCustomProvider(id);
@@ -447,10 +506,6 @@ export const AIProvidersSettings: React.FC = () => {
                         options={(() => {
                             const opts: { id: string; name: string }[] = [];
 
-                            if (hasStoredKey.natively) {
-                                opts.push({ id: 'natively', name: 'Natively API' });
-                            }
-
                             for (const [prov, cfg] of Object.entries(STANDARD_CLOUD_MODELS)) {
                                 if (!hasStoredKey[prov as keyof typeof hasStoredKey]) continue;
                                 cfg.ids.forEach((id, i) => opts.push({ id, name: cfg.names[i] }));
@@ -478,7 +533,7 @@ export const AIProvidersSettings: React.FC = () => {
                 {/* Fast Response Mode */}
                 <div
                     className={`bg-bg-item-surface rounded-xl p-5 border border-border-subtle flex items-center justify-between ${!canUseFastMode ? 'opacity-50 grayscale' : ''}`}
-                    title={!canUseFastMode ? "Requires a Groq API Key or Natively API to be configured" : ""}
+                    title={!canUseFastMode ? "Requires a Groq API Key to be configured" : ""}
                 >
                     <div>
                         <div className="flex items-center gap-2">
@@ -487,13 +542,13 @@ export const AIProvidersSettings: React.FC = () => {
                         </div>
                         <p className="text-[10px] text-text-secondary mt-0.5">Super fast responses using Groq Llama 3 for text. Multimodal requests still use your Default Model.</p>
                         {!canUseFastMode && (
-                            <p className="text-[10px] text-orange-500 mt-0.5 font-medium">Requires a Groq API Key or Natively API to be configured.</p>
+                            <p className="text-[10px] text-orange-500 mt-0.5 font-medium">Requires a Groq API Key to be configured.</p>
                         )}
                     </div>
                     <div
                         onClick={async () => {
                             if (!canUseFastMode) {
-                                alert("Please configure a Groq API Key or Natively API first to enable Fast Response Mode.");
+                                alert("Please configure a Groq API Key first to enable Fast Response Mode.");
                                 return;
                             }
                             const newState = !fastResponseMode;
@@ -509,12 +564,86 @@ export const AIProvidersSettings: React.FC = () => {
                 </div>
             </div>
 
-            {/* Cloud Providers */}
+            {/* v2.16.0: Sensi AI (managed) — the default for signed-in users */}
             <div className="space-y-5">
                 <div>
-                    <h3 className="text-sm font-bold text-text-primary mb-1">Cloud Providers</h3>
-                    <p className="text-xs text-text-secondary mb-2">Add API keys to unlock cloud AI models.</p>
+                    <h3 className="text-sm font-bold text-text-primary mb-1">Sensi AI</h3>
+                    <p className="text-xs text-text-secondary mb-2">No key required. Free; upgrade for unlimited.</p>
                 </div>
+
+                <div className={`rounded-xl border p-5 ${activeProvider === 'sensi-managed' ? 'border-accent-primary/40 bg-accent-primary/5' : 'border-border-subtle bg-bg-item-surface'}`}>
+                    <div className="flex items-start gap-4">
+                        <div className="w-10 h-10 rounded-lg bg-accent-primary/10 border border-accent-primary/20 flex items-center justify-center shrink-0 text-accent-primary">
+                            <Sparkles size={20} strokeWidth={1.8} />
+                        </div>
+                        <div className="flex-1">
+                            <div className="flex items-center gap-2 mb-1">
+                                <h4 className="text-sm font-semibold text-text-primary">Sensi AI</h4>
+                                {authState?.signedIn ? (
+                                    <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded-full border uppercase tracking-wide ${authState.tier === 'pro' ? 'text-amber-400 bg-amber-400/10 border-amber-400/20' : 'text-emerald-500 bg-emerald-500/10 border-emerald-500/20'}`}>
+                                        {authState.tier === 'pro' ? 'Pro' : 'Free'}
+                                    </span>
+                                ) : (
+                                    <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full border text-text-tertiary bg-bg-input border-border-subtle uppercase tracking-wide">Sign in</span>
+                                )}
+                                {activeProvider === 'sensi-managed' && (
+                                    <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full border text-accent-primary bg-accent-primary/10 border-accent-primary/20 uppercase tracking-wide">Active</span>
+                                )}
+                            </div>
+                            <p className="text-[11px] text-text-secondary">
+                                {authState?.signedIn
+                                    ? 'Your account covers everything. No keys needed.'
+                                    : 'Sign in once. No keys to manage.'}
+                            </p>
+                        </div>
+                        {authState?.signedIn ? (
+                            <button
+                                onClick={async () => {
+                                    if (activeProvider === 'sensi-managed') return;
+                                    setManagedBusy(true);
+                                    setManagedError(null);
+                                    try {
+                                        await window.electronAPI?.setActiveProviderAndModel?.('sensi-managed', 'sensi-managed');
+                                        setActiveProvider('sensi-managed');
+                                    } catch (e) {
+                                        setManagedError(e instanceof Error ? e.message : 'Could not activate Sensi AI.');
+                                    } finally {
+                                        setManagedBusy(false);
+                                    }
+                                }}
+                                disabled={managedBusy || activeProvider === 'sensi-managed'}
+                                className={`px-4 py-2 rounded-lg text-xs font-medium transition-colors shrink-0 ${activeProvider === 'sensi-managed' ? 'bg-accent-primary/10 text-accent-primary border border-accent-primary/30' : 'bg-accent-primary/90 hover:bg-accent-primary text-white disabled:opacity-50'}`}
+                            >
+                                {managedBusy ? 'Activating...' : activeProvider === 'sensi-managed' ? 'In use' : 'Use as default'}
+                            </button>
+                        ) : (
+                            <button
+                                onClick={() => { void window.electronAPI?.authSignIn?.().catch(() => { /* noop */ }); }}
+                                className="px-4 py-2 rounded-lg text-xs font-medium bg-accent-primary/90 hover:bg-accent-primary text-white shrink-0"
+                            >
+                                Sign in
+                            </button>
+                        )}
+                    </div>
+                    {managedError && (
+                        <p className="mt-2 text-[11px] text-red-400">{managedError}</p>
+                    )}
+                </div>
+            </div>
+
+            {/* Power user — bring your own key. Collapsed by default for
+                signed-in users; always expanded for signed-out users so
+                they still have a discoverable path to BYOK. */}
+            <details className="space-y-5 [&_summary]:list-none" {...(authState?.signedIn ? {} : { open: true })}>
+                <summary className="cursor-pointer select-none">
+                    <div className="flex items-center justify-between">
+                        <div>
+                            <h3 className="text-sm font-bold text-text-primary mb-1">Power user — bring your own key</h3>
+                            <p className="text-xs text-text-secondary mb-2">Use your own Gemini / OpenAI / Claude / Groq / MiniMax key instead of Sensi AI.</p>
+                        </div>
+                        <ChevronDown size={16} className="text-text-tertiary group-open:rotate-180 transition-transform" />
+                    </div>
+                </summary>
 
                 <div className="space-y-4">
 
@@ -598,6 +727,154 @@ export const AIProvidersSettings: React.FC = () => {
                         onPreferredModelChange={(model) => setPreferredModels(prev => ({ ...prev, claude: model }))}
                     />
 
+                    {/* sensi M1 Step 3 — MiniMax (text-only via OpenAI-compat endpoint).
+                        Routed through the existing ProviderCard pattern. The
+                        fetchProviderModels IPC returns the static MiniMax-M2.7 +
+                        MiniMax-M2.7-highspeed baseline from
+                        electron/shared/standardCloudModels.ts (no dynamic /v1/models
+                        call yet). Vision is NOT supported on this endpoint — see the
+                        warning in LLMHelper.streamChat() dispatch branch. */}
+                    <ProviderCard
+                        providerId="minimax"
+                        providerName="MiniMax"
+                        apiKey={minimaxApiKey}
+                        preferredModel={preferredModels.minimax}
+                        hasStoredKey={!!hasStoredKey.minimax}
+                        onKeyChange={setMinimaxApiKey}
+                        onSaveKey={async () => { await handleSaveKey('minimax', minimaxApiKey, setMinimaxApiKey); }}
+                        onRemoveKey={() => handleRemoveKey('minimax', setMinimaxApiKey)}
+                        onTestConnection={() => handleTestConnection('minimax', minimaxApiKey)}
+                        testStatus={testStatus.minimax || 'idle'}
+                        testError={testError.minimax}
+                        savingStatus={!!savingStatus.minimax}
+                        savedStatus={!!savedStatus.minimax}
+                        keyPlaceholder="MiniMax API key..."
+                        keyUrl="https://platform.minimax.io/user-center/basic-information/interface-key"
+                        onPreferredModelChange={(model) => setPreferredModels(prev => ({ ...prev, minimax: model }))}
+                    />
+
+                </div>
+            </details>
+
+            {/* sensi M7 / RESEARCH-01: Search Providers
+                Surfaces Tavily as a first-class provider so the overlay
+                Research chip can operate without any persona setup. */}
+            <div className="space-y-5">
+                <div>
+                    <h3 className="text-sm font-bold text-text-primary mb-1">Search Providers</h3>
+                    <p className="text-xs text-text-secondary mb-2">Power live web lookups and the overlay's Research action.</p>
+                </div>
+
+                <div className="bg-bg-item-surface rounded-xl border border-border-subtle">
+                    <div className="p-5">
+                        <div className="flex items-center gap-4 mb-4">
+                            <div className="w-10 h-10 rounded-lg bg-bg-input border border-border-subtle flex items-center justify-center text-emerald-500 shrink-0">
+                                <Globe size={20} />
+                            </div>
+                            <div>
+                                <div className="flex items-center gap-2">
+                                    <h4 className="text-sm font-bold text-text-primary">Tavily</h4>
+                                    {hasStoredTavilyKey && (
+                                        <span className="text-[9px] font-bold text-emerald-500 px-1.5 py-0.5 bg-emerald-500/10 rounded-full border border-emerald-500/20 uppercase tracking-wide">Connected</span>
+                                    )}
+                                </div>
+                                <p className="text-[11px] text-text-secondary mt-0.5">
+                                    Live web search for company research and topic briefs.
+                                </p>
+                            </div>
+                        </div>
+
+                        <div className="space-y-3">
+                            <div>
+                                <div className="flex justify-between items-center mb-1.5">
+                                    <label className="text-[10px] font-semibold text-text-secondary uppercase tracking-wide block">API Key</label>
+                                    <div className="flex items-center gap-2">
+                                        <button
+                                            onClick={() => {
+                                                // @ts-ignore
+                                                window.electronAPI?.openExternal?.('https://app.tavily.com/home');
+                                            }}
+                                            className="text-[10px] flex items-center gap-1 text-text-tertiary hover:text-text-primary transition-colors"
+                                            title="Get a Tavily API key"
+                                        >
+                                            <span className="uppercase tracking-wide">Get Key</span>
+                                            <ExternalLink size={10} />
+                                        </button>
+                                        {hasStoredTavilyKey && (
+                                            <button
+                                                onClick={async () => {
+                                                    try {
+                                                        const result = await window.electronAPI?.setTavilyApiKey?.('');
+                                                        if (result?.success) {
+                                                            setHasStoredTavilyKey(false);
+                                                            setTavilyApiKey('');
+                                                        }
+                                                    } catch (e: any) {
+                                                        setTavilyError(e?.message ?? 'Failed to remove key.');
+                                                    }
+                                                }}
+                                                className="text-[10px] flex items-center gap-1 text-red-400 hover:text-red-300 transition-colors bg-red-500/10 hover:bg-red-500/20 px-1.5 py-0.5 rounded"
+                                                title="Remove API Key"
+                                            >
+                                                <Trash2 size={10} strokeWidth={2} /> Remove
+                                            </button>
+                                        )}
+                                    </div>
+                                </div>
+                                <input
+                                    type="password"
+                                    value={tavilyApiKey}
+                                    onChange={(e) => { setTavilyApiKey(e.target.value); setTavilyError(''); }}
+                                    placeholder={hasStoredTavilyKey ? '••••••••••••' : 'Enter Tavily API key (tvly-...)'}
+                                    className="w-full bg-bg-input border border-border-subtle rounded-lg px-3 py-2 text-xs text-text-primary placeholder-text-tertiary focus:outline-none focus:border-accent-primary/50 focus:ring-1 focus:ring-accent-primary/20 transition-all"
+                                />
+                            </div>
+                            {tavilyError && (
+                                <p className="text-[10px] text-red-400 px-1">{tavilyError}</p>
+                            )}
+                            <button
+                                onClick={async () => {
+                                    if (!tavilyApiKey.trim()) return;
+                                    setTavilyError('');
+                                    setTavilySaving(true);
+                                    try {
+                                        const result = await window.electronAPI?.setTavilyApiKey?.(tavilyApiKey.trim());
+                                        if (result && !result.success) {
+                                            setTavilyError(result.error ?? 'Failed to save API key.');
+                                        } else {
+                                            setHasStoredTavilyKey(true);
+                                            setTavilyApiKey('');
+                                        }
+                                    } catch (e: any) {
+                                        setTavilyError(e?.message ?? 'Unexpected error saving API key.');
+                                    } finally {
+                                        setTavilySaving(false);
+                                    }
+                                }}
+                                disabled={tavilySaving || !tavilyApiKey.trim()}
+                                className={`w-full px-4 py-2 rounded-lg text-xs font-medium transition-all ${tavilySaving ? 'bg-bg-input text-text-tertiary cursor-wait' : !tavilyApiKey.trim() ? 'bg-bg-input text-text-tertiary cursor-not-allowed' : 'bg-emerald-600 text-white hover:bg-emerald-500 shadow-sm'}`}
+                            >
+                                {tavilySaving ? 'Saving...' : 'Save API Key'}
+                            </button>
+                        </div>
+
+                        <div className="mt-3 flex items-start gap-2 px-3 py-2.5 bg-bg-input/50 rounded-lg">
+                            <AlertCircle size={12} className="text-text-tertiary shrink-0 mt-0.5" />
+                            <p className="text-[10px] text-text-tertiary leading-relaxed">
+                                Without a key, Research falls back to LLM general knowledge (may be outdated). Grab a free key at{' '}
+                                <span
+                                    className="text-emerald-500/80 hover:text-emerald-400 underline underline-offset-2 cursor-pointer"
+                                    onClick={() => {
+                                        // @ts-ignore
+                                        window.electronAPI?.openExternal?.('https://app.tavily.com/home');
+                                    }}
+                                >
+                                    app.tavily.com
+                                </span>
+                                . Keys start with <code className="text-emerald-500/80">tvly-</code>.
+                            </p>
+                        </div>
+                    </div>
                 </div>
             </div>
 

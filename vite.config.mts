@@ -13,6 +13,13 @@ export default defineConfig({
     resolve: {
         alias: {
             "@": path.resolve(__dirname, "./src"),
+            // sensi M1: narrow aliases for runtime-safe type + registry modules
+            // shared between main and renderer. Only type-only or pure-data
+            // modules live under these roots — nothing with Node imports or
+            // Electron-only code. See electron/shared/standardCloudModels.ts
+            // and electron/providers/types.ts.
+            "@shared": path.resolve(__dirname, "./electron/shared"),
+            "@providers": path.resolve(__dirname, "./electron/providers"),
         },
     },
     server: {

@@ -12,6 +12,7 @@ import { LLMHelper } from './LLMHelper';
 import { SessionTracker } from './SessionTracker';
 import { IntelligenceEngine } from './IntelligenceEngine';
 import { MeetingPersistence } from './MeetingPersistence';
+import type { RollingTriggerMode } from './llm/RollingTriggerPolicy';
 
 // Re-export types for backward compatibility
 export type { TranscriptSegment, SuggestionTrigger, ContextItem } from './SessionTracker';
@@ -84,6 +85,12 @@ export class IntelligenceManager extends EventEmitter {
 
     setMeetingMetadata(metadata: any): void {
         this.session.setMeetingMetadata(metadata);
+        // sensi M7 / KNOWLEDGE-02: push the event id into the engine so
+        // WhatToAnswerLLM can prefer event-attached knowledge.
+        const eventId = typeof metadata?.calendarEventId === 'string' && metadata.calendarEventId
+            ? metadata.calendarEventId
+            : null;
+        this.engine.setActiveEventId(eventId);
     }
 
     addTranscript(segment: import('./SessionTracker').TranscriptSegment, skipRefinementCheck: boolean = false): void {
@@ -133,6 +140,51 @@ export class IntelligenceManager extends EventEmitter {
     }
 
     // ============================================
+    // M5-T6: Rolling-trigger mode (delegates to engine)
+    // ============================================
+
+    setRollingTriggerMode(mode: RollingTriggerMode): void {
+        this.engine.setRollingTriggerMode(mode);
+    }
+
+    getRollingTriggerMode(): RollingTriggerMode {
+        return this.engine.getRollingTriggerMode();
+    }
+
+    /** v2.14.8: auto-answer sensitivity (silence threshold in ms). */
+    setRollingTriggerSilenceMs(ms: number): void {
+        this.engine.setRollingTriggerSilenceMs(ms);
+    }
+
+    getRollingTriggerSilenceMs(): number {
+        return this.engine.getRollingTriggerSilenceMs();
+    }
+
+    /**
+     * v2.15.0: STT-driven turn-end signal from Deepgram's VAD. Arms
+     * the rolling-trigger policy to fire on next tick without waiting
+     * on the blind silence timer. Falls back to the timer for STT
+     * providers that don't emit `UtteranceEnd`.
+     */
+    handleUtteranceEnd(): void {
+        this.engine.handleUtteranceEnd();
+    }
+
+    /**
+     * v2.15.0: cancel the currently-streaming rolling response. Used
+     * when the interviewer resumes speaking mid-stream; the next
+     * UtteranceEnd will re-fire with the fuller transcript.
+     */
+    cancelActiveStream(): void {
+        this.engine.cancelActiveStream();
+    }
+
+    /** M5-T6: exposed for tests. */
+    getRollingTriggerPolicy() {
+        return this.engine.getRollingTriggerPolicy();
+    }
+
+    // ============================================
     // Mode Executors (delegates to engine)
     // ============================================
 
@@ -142,6 +194,11 @@ export class IntelligenceManager extends EventEmitter {
 
     async runWhatShouldISay(question?: string, confidence?: number, imagePaths?: string[]): Promise<string | null> {
         return this.engine.runWhatShouldISay(question, confidence, imagePaths);
+    }
+
+    // v2.6.2: full solution mode for LeetCode / HackerRank / coding assessments.
+    async runAssessmentSolve(imagePaths: string[]): Promise<string | null> {
+        return this.engine.runAssessmentSolve(imagePaths);
     }
 
     async runFollowUp(intent: string, userRequest?: string): Promise<string | null> {

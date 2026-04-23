@@ -4,48 +4,72 @@ interface RollingTranscriptProps {
     text: string;
     isActive?: boolean;
     surfaceStyle?: React.CSSProperties;
+    /**
+     * v2.6.1: eyebrow label for the other-party speaker. Defaults to
+     * "Speaker" (generic). Callers set this to "Interviewer" when
+     * Interview Mode is on (actionButtonMode === 'brainstorm').
+     */
+    speakerLabel?: string;
 }
 
 /**
- * RollingTranscript - A single-line horizontally scrolling transcript bar
+ * RollingTranscript — interviewer-speech transcript bar for the overlay.
  *
- * Displays real-time speech transcription as a smooth left-scrolling text track.
- * Features:
- * - Fixed height, single line only
- * - Text flows from right to left as new words arrive
- * - Edge fade gradients for visual polish
+ * v2.5.0 redesign for readability:
+ *   - Multi-line block (max 2 lines) — you can actually read what the
+ *     interviewer said, not just the last 4 words scrolling past.
+ *   - Upright (not italic) — italic at small sizes is harder to read.
+ *   - Larger 14.5 px type, warm off-white on a tinted container so it
+ *     reads at a glance under time pressure.
+ *   - Eyebrow label "INTERVIEWER" with brand-brass tint + animated ping
+ *     when they're currently speaking.
+ *   - Auto-scrolls to reveal latest content but clamps to 2 lines so it
+ *     never balloons the overlay height.
  */
-const RollingTranscript: React.FC<RollingTranscriptProps> = ({ text, isActive = true, surfaceStyle }) => {
-    const containerRef = useRef<HTMLDivElement>(null);
+const RollingTranscript: React.FC<RollingTranscriptProps> = ({ text, isActive = true, surfaceStyle, speakerLabel = 'Speaker' }) => {
+    const textRef = useRef<HTMLDivElement>(null);
 
-    // Auto-scroll to the end when text updates
+    // Auto-scroll to show the latest tokens as the line grows. 2-line clamp
+    // means we drop the earliest line when new content overflows — caller
+    // already maintains the "recent enough" text window.
     useEffect(() => {
-        if (containerRef.current) {
-            containerRef.current.scrollLeft = containerRef.current.scrollWidth;
+        if (textRef.current) {
+            textRef.current.scrollTop = textRef.current.scrollHeight;
         }
     }, [text]);
 
     if (!text) return null;
 
     return (
-        <div className="relative w-[90%] mx-auto pt-2">
-            {/* Scrolling Container */}
+        <div
+            className="mx-3 mt-3 mb-1 rounded-[10px] border border-[var(--accent-primary)]/15 bg-[var(--accent-primary)]/[0.04] px-3 py-2"
+            style={surfaceStyle}
+        >
+            {/* Eyebrow */}
+            <div className="flex items-center gap-2 mb-1">
+                <div className="relative flex items-center justify-center w-1.5 h-1.5">
+                    {isActive && (
+                        <div className="absolute inset-0 rounded-full bg-[var(--accent-primary)] opacity-40 animate-ping" />
+                    )}
+                    <div className={`relative w-1 h-1 rounded-full bg-[var(--accent-primary)] ${isActive ? '' : 'opacity-50'}`} />
+                </div>
+                <span className="text-[9.5px] font-bold uppercase tracking-[0.18em] text-[var(--accent-primary)]">
+                    {speakerLabel} {isActive ? '· live' : ''}
+                </span>
+            </div>
+
+            {/* Body — 2-line clamp, upright, high-contrast warm-white */}
             <div
-                ref={containerRef}
-                className="overflow-hidden whitespace-nowrap text-right scroll-smooth overlay-transcript-surface"
+                ref={textRef}
+                className="overflow-hidden text-[14px] leading-[1.45] tracking-[-0.005em] text-[var(--overlay-text-strong)] font-normal"
                 style={{
-                    ...surfaceStyle,
-                    maskImage: 'linear-gradient(to right, transparent, black 10%, black 90%, transparent)'
+                    display: '-webkit-box',
+                    WebkitLineClamp: 2,
+                    WebkitBoxOrient: 'vertical',
+                    maxHeight: '2.9em',
                 }}
             >
-                <span className="overlay-text-secondary inline-flex items-center text-[13px] italic leading-7 transition-all duration-300">
-                    {text}
-                    {isActive && (
-                        <span className="inline-flex items-center ml-2">
-                            <span className="w-1 h-1 bg-green-500/60 rounded-full animate-pulse" />
-                        </span>
-                    )}
-                </span>
+                {text}
             </div>
         </div>
     );

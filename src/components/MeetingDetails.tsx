@@ -4,7 +4,7 @@ import { ArrowLeft, Search, Mail, Link, ChevronDown, Play, ArrowUp, Copy, Check,
 import { motion, AnimatePresence } from 'framer-motion';
 import MeetingChatOverlay from './MeetingChatOverlay';
 import EditableTextBlock from './EditableTextBlock';
-import NativelyLogo from './icon.png';
+import { SensiMark } from './SensiLogoMark';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
@@ -60,7 +60,7 @@ interface MeetingDetailsProps {
     onOpenSettings: () => void;
 }
 
-const MeetingDetails: React.FC<MeetingDetailsProps> = ({ meeting: initialMeeting }) => {
+const MeetingDetails: React.FC<MeetingDetailsProps> = ({ meeting: initialMeeting, onBack }) => {
     const isLight = useResolvedTheme() === 'light';
     // We need local state for the meeting object to reflect optimistic updates
     const [meeting, setMeeting] = useState<Meeting>(initialMeeting);
@@ -190,6 +190,21 @@ ${meeting.detailedSummary.keyPoints?.map(item => `- ${item}`).join('\n') || 'Non
                     transition={{ delay: 0.1, duration: 0.3 }}
                     className="max-w-4xl mx-auto px-8 py-8 pb-32" // Added pb-32 for floating footer clearance
                 >
+                    {/* v2.6.3: prominent sticky back button. The window header's arrow at the
+                        far-left gets lost next to the traffic lights; users couldn't find it,
+                        especially when scrolled down through a long summary. Sticky keeps it
+                        visible no matter how far into the transcript the user has scrolled. */}
+                    <div className="sticky top-0 -mx-8 px-8 pt-2 pb-3 mb-2 z-20 bg-gradient-to-b from-bg-secondary via-bg-secondary/95 to-transparent backdrop-blur-sm">
+                        <button
+                            onClick={onBack}
+                            className="inline-flex items-center gap-2 px-3 py-1.5 rounded-md text-[12px] font-medium text-text-secondary hover:text-text-primary hover:bg-bg-item-surface border border-transparent hover:border-border-subtle transition-all focus:outline-none focus-visible:ring-1 focus-visible:ring-[var(--accent-primary)]/40"
+                            title="Back to meetings list"
+                        >
+                            <ArrowLeft size={13} />
+                            All meetings
+                        </button>
+                    </div>
+
                     {/* Meta Info & Actions Row */}
                     <div className="flex items-start justify-between mb-6">
                         <div className="w-full pr-4">
@@ -415,7 +430,8 @@ ${meeting.detailedSummary.keyPoints?.map(item => `- ${item}`).join('\n') || 'Non
                                         {interaction.answer && (
                                             <div className="flex items-start gap-4">
                                                 <div className="mt-1 w-6 h-6 rounded-full bg-bg-input flex items-center justify-center border border-border-subtle shrink-0">
-                                                    <img src={NativelyLogo} alt="AI" className="w-4 h-4 opacity-50 object-contain force-black-icon" />
+                                                    {/* POLISH-01a: SVG mark replaces raster icon.png's upstream "N" glyph */}
+                                                    <SensiMark variant="mark" size={16} className="opacity-50" />
                                                 </div>
                                                 <div>
                                                     <div className="text-[11px] text-text-tertiary mb-1.5 font-medium">{formatTime(interaction.timestamp)}</div>

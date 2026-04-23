@@ -1,5 +1,5 @@
 import { ChevronUp, ChevronDown, PointerOff } from "lucide-react";
-import icon from "../icon.png";
+import { SensiMark } from "../SensiLogoMark";
 import type { OverlayAppearance } from "../../lib/overlayAppearance";
 
 interface TopPillProps {
@@ -45,13 +45,8 @@ export default function TopPill({
           `}
                     style={appearance.iconStyle}
                 >
-                    <img
-                        src={icon}
-                        alt="Natively"
-                        className="w-[24px] h-[24px] object-contain opacity-95 scale-105 force-black-icon"
-                        draggable="false"
-                        onDragStart={(e) => e.preventDefault()}
-                    />
+                    {/* POLISH-01a: SVG mark replaces raster icon.png's upstream "N" glyph */}
+                    <SensiMark variant="mark" size={20} className="opacity-95" />
                 </button>
 
                 {/* CENTER SEGMENT */}

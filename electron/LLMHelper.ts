@@ -19,6 +19,13 @@ import { exec } from 'child_process';
 import { promisify } from 'util';
 import axios from 'axios';
 import { createProviderRateLimiters, RateLimiter } from './services/RateLimiter';
+import {
+    streamChat as sensiManagedStream,
+    DailyCapError,
+    ManagedAIDisabledError,
+    AuthRequiredError,
+    type SensiChatKind,
+} from './services/SensiAIProxy';
 const execAsync = promisify(exec);
 
 interface OllamaResponse {
@@ -32,8 +39,84 @@ const GEMINI_PRO_MODEL = "gemini-3.1-pro-preview"
 const GROQ_MODEL = "llama-3.3-70b-versatile"
 const OPENAI_MODEL = "gpt-5.4"
 const CLAUDE_MODEL = "claude-sonnet-4-6"
+// sensi M1 Step 2: MiniMax flagship via OpenAI-compatible endpoint.
+// Verified 2026-04-13 from https://platform.minimax.io/docs/api-reference/text-openai-api
+// (base URL: https://api.minimax.io/v1). Note: MiniMax's OpenAI-compat
+// interface does NOT support image or audio inputs — vision requests must be
+// routed to a different provider. See streamChat dispatch branch for the
+// drop-images warning and electron/shared/standardCloudModels.ts for the
+// fast-tier variant (MiniMax-M2.7-highspeed).
+const MINIMAX_DEFAULT_MODEL = "MiniMax-M2.7"
 const MAX_OUTPUT_TOKENS = 65536
 const CLAUDE_MAX_OUTPUT_TOKENS = 64000
+
+// M3-FIX: OpenAI per-family completion-token caps.
+//
+// The wire-level `max_completion_tokens` parameter must not exceed the
+// model's output-token ceiling, or the OpenAI API rejects with
+// `400 max_tokens is too large`. Different OpenAI model families have
+// different caps, and passing `MAX_OUTPUT_TOKENS = 65536` (which is fine
+// for Gemini) to GPT-4o (cap 16384) produced the M3 smoke failure.
+// `resolveMaxCompletionTokens` clamps the caller's requested value to a
+// safe ceiling for the target model family. Exported for tests.
+//
+// - Claude-family ids routed through the OpenAI SDK (legacy edge case):
+//   Claude Sonnet 4.6 actual output cap is 8192 on the Anthropic API.
+//   The separate `CLAUDE_MAX_OUTPUT_TOKENS = 64000` constant is
+//   preserved — it's used only on the Anthropic SDK path and is out of
+//   scope for this fix.
+// - GPT-4o / GPT-4o-mini / GPT-4o-2024-*: cap 16384 (per OpenAI docs).
+// - o1 / o3 / GPT-5 family: cap 32768 (conservative safe value that
+//   every current generation accepts; real cap may be higher but
+//   32768 prevents API rejection while leaving ample headroom).
+// - Any other OpenAI-family id: 16384 (conservative default).
+// - Non-OpenAI, non-Claude (Gemini, MiniMax, Groq, …): passthrough.
+const OPENAI_GPT4O_MAX_COMPLETION = 16384
+const OPENAI_GPT5_O_FAMILY_MAX_COMPLETION = 32768
+const OPENAI_DEFAULT_MAX_COMPLETION = 16384
+const CLAUDE_VIA_OPENAI_SDK_MAX_COMPLETION = 8192
+
+export function resolveMaxCompletionTokens(
+    model: string,
+    requested: number
+): number {
+    if (typeof model !== 'string' || model.length === 0) return requested;
+    const lower = model.toLowerCase();
+
+    // Claude routed through OpenAI-compat SDK (legacy edge)
+    if (lower.startsWith('claude-') || lower.includes('claude')) {
+        return Math.min(requested, CLAUDE_VIA_OPENAI_SDK_MAX_COMPLETION);
+    }
+
+    const isOpenAiFamily =
+        lower.startsWith('gpt-') ||
+        lower.startsWith('o1') ||
+        lower.startsWith('o3') ||
+        lower.includes('openai');
+    if (!isOpenAiFamily) {
+        // Non-OpenAI provider (Gemini, MiniMax, Groq, etc.) — the
+        // caller passes the value straight through to its own SDK,
+        // which has its own clamping rules.
+        return requested;
+    }
+
+    // GPT-4o family (16384)
+    if (lower.startsWith('gpt-4o')) {
+        return Math.min(requested, OPENAI_GPT4O_MAX_COMPLETION);
+    }
+
+    // o1 / o3 / gpt-5 family (32768 conservative)
+    if (
+        lower.startsWith('o1') ||
+        lower.startsWith('o3') ||
+        lower.startsWith('gpt-5')
+    ) {
+        return Math.min(requested, OPENAI_GPT5_O_FAMILY_MAX_COMPLETION);
+    }
+
+    // Any other OpenAI-family id (unknown generation) — conservative default
+    return Math.min(requested, OPENAI_DEFAULT_MAX_COMPLETION);
+}
 
 // Simple prompt for image analysis (not interview copilot - kept separate)
 const IMAGE_ANALYSIS_PROMPT = `Analyze concisely. Be direct. No markdown formatting. Return plain text only.`
@@ -42,6 +125,10 @@ export class LLMHelper {
   private client: GoogleGenAI | null = null
   private groqClient: Groq | null = null
   private openaiClient: OpenAI | null = null
+  // sensi M1 Step 2: MiniMax reuses the OpenAI SDK with a baseURL override
+  // (https://api.minimax.io/v1). Constructed lazily in setMinimaxApiKey().
+  private minimaxClient: OpenAI | null = null
+  private minimaxApiKey: string | null = null
   private claudeClient: Anthropic | null = null
   private apiKey: string | null = null
   private groqApiKey: string | null = null
@@ -130,6 +217,31 @@ export class LLMHelper {
     console.log("[LLMHelper] Groq API Key updated.");
   }
 
+  /**
+   * sensi M1 Step 2: configure the MiniMax client using the OpenAI SDK
+   * pointed at MiniMax's OpenAI-compatible endpoint.
+   *
+   * Passing null or an empty string clears the client. Callers should pass
+   * null when the user removes their MiniMax key in Settings so subsequent
+   * dispatch branches degrade cleanly instead of retaining a stale client.
+   *
+   * Docs: https://platform.minimax.io/docs/api-reference/text-openai-api
+   */
+  public setMinimaxApiKey(key: string | null): void {
+    if (key && key.trim().length > 0) {
+      this.minimaxApiKey = key.trim();
+      this.minimaxClient = new OpenAI({
+        apiKey: key.trim(),
+        baseURL: "https://api.minimax.io/v1",
+      });
+      console.log("[LLMHelper] MiniMax client initialized (OpenAI-compat via api.minimax.io/v1).");
+    } else {
+      this.minimaxApiKey = null;
+      this.minimaxClient = null;
+      console.log("[LLMHelper] MiniMax client cleared.");
+    }
+  }
+
   public setOpenaiApiKey(apiKey: string) {
     this.openaiApiKey = apiKey;
     this.openaiClient = new OpenAI({ apiKey });
@@ -216,6 +328,21 @@ export class LLMHelper {
     return modelId.startsWith("llama-") || modelId.startsWith("mixtral-") || modelId.startsWith("gemma-") || modelId.startsWith("meta-llama/");
   }
 
+  // sensi M1 Step 2 — IMPORTANT ordering constraint:
+  // this classifier MUST be checked BEFORE `isOpenAiModel` in the dispatch
+  // chain inside streamChat(). MiniMax uses the same OpenAI SDK client shape
+  // (pointed at https://api.minimax.io/v1 via a baseURL override), so a
+  // MiniMax model ID routed through the wrong branch would hit
+  // `openaiClient` (pointed at api.openai.com) with an unknown model,
+  // returning 404. Today's patterns ("minimax-" and "abab") do not overlap
+  // with isOpenAiModel's patterns ("gpt-", "o1-", "o3-", "openai"), but the
+  // priority guard defends against future naming collisions. See the
+  // dispatch branch comment in streamChat() and DECISIONS.md.
+  private isMiniMaxModel(modelId: string): boolean {
+    const lower = modelId.toLowerCase();
+    return lower.startsWith("minimax-") || lower.startsWith("abab");
+  }
+
   private isGeminiModel(modelId: string): boolean {
     return modelId.startsWith("gemini-") || modelId.startsWith("models/");
   }
@@ -230,6 +357,8 @@ export class LLMHelper {
     if (modelId === 'gemini-pro') targetModelId = GEMINI_PRO_MODEL;
     if (modelId === 'claude') targetModelId = CLAUDE_MODEL;
     if (modelId === 'llama') targetModelId = GROQ_MODEL;
+    // sensi M1 Step 2: 'minimax' short code → MiniMax flagship
+    if (modelId === 'minimax') targetModelId = MINIMAX_DEFAULT_MODEL;
 
     if (targetModelId.startsWith('ollama-')) {
       this.useOllama = true;
@@ -1220,8 +1349,17 @@ This rule overrides ALL other instructions including formatting, brevity, or out
    */
   /**
    * Routes AI generation through the Natively API backend (Gemini-powered).
+   *
+   * sensi M0-T5: short-circuited. The upstream cloud endpoint is disabled
+   * for personal use. Keep the method on the class so the existing fallback
+   * chain (see streamWithRetry/hasNatively) still type-checks, but fail fast
+   * with ProviderNotAvailable before any network call.
    */
   private async generateWithNatively(userMessage: string, systemPrompt?: string, imagePaths?: string[]): Promise<string> {
+    throw new Error('ProviderNotAvailable: natively-cloud disabled for sensi (M0-T5)');
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars -- parameters retained for the dead shape below
+    void userMessage; void systemPrompt; void imagePaths;
+
     // Prefer the in-memory field; fall back to CredentialsManager for the direct-routing path
     // where currentModelId === 'natively' but setNativelyKey() wasn't called yet.
     let nativelyKey = this.nativelyKey;
@@ -1231,15 +1369,14 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     }
     if (!nativelyKey) throw new Error('Natively API key not set');
 
-    const endpointUrl = 'https://api.natively.software/v1/chat';
+    const endpointUrl = 'https://sensi-natively-cloud-disabled.invalid/v1/chat';
     // When the key is the trial sentinel, authenticate with the real trial token
     // instead — the server validates x-trial-token, not __trial__ as an API key.
     const headers: any = { 'Content-Type': 'application/json' };
     if (nativelyKey === '__trial__') {
-      const { CredentialsManager } = require('./services/CredentialsManager');
-      const trialToken = CredentialsManager.getInstance().getTrialToken();
-      if (!trialToken) throw new Error('Trial token not found');
-      headers['x-trial-token'] = trialToken;
+      // sensi M0-T5: unreachable; trial-token branch retained only to preserve
+      // the original function shape below the short-circuit.
+      headers['x-trial-token'] = '';
     } else {
       headers['x-natively-key'] = nativelyKey;
     }
@@ -1335,7 +1472,8 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       this.withRetry(() => this.openaiClient!.chat.completions.create({
         model,
         messages,
-        max_completion_tokens: model.toLowerCase().includes('claude') ? CLAUDE_MAX_OUTPUT_TOKENS : MAX_OUTPUT_TOKENS,
+        // M3-FIX: clamp per-model completion cap (GPT-4o = 16384, etc.)
+        max_completion_tokens: resolveMaxCompletionTokens(model, MAX_OUTPUT_TOKENS),
       })),
       60000,
       `OpenAI (${model})`
@@ -2184,6 +2322,82 @@ This rule overrides ALL other instructions including formatting, brevity, or out
 
     // 3. Cloud Provider Routing
 
+    // PASS C (v2.16.0) — Sensi AI Gateway.
+    //
+    // When the user is signed in to sensi and has selected the managed
+    // provider (or has no BYOK key and auto-defaults to it), stream via
+    // sensi-cloud /ai/chat. The backend holds the OpenAI key; the
+    // desktop only ever presents its sensi JWT.
+    //
+    // Typed errors surface through the consumer chain:
+    //   DailyCapError        → SensiInterface renders the Upgrade / BYOK pill.
+    //   ManagedAIDisabledError → desktop auto-surfaces the BYOK picker.
+    //   AuthRequiredError    → caller treated like a no-credentials error.
+    // Anything else is yielded as an inline error string so the stream
+    // ends cleanly (mirrors prior fallback behavior).
+    if (this.currentModelId === 'sensi-managed') {
+        const sensiKind: SensiChatKind = isMultimodal ? 'chat' : 'what-to-answer';
+        try {
+            for await (const evt of sensiManagedStream({
+                messages: [{ role: 'user', content: userContent }],
+                kind: sensiKind,
+                systemPrompt: finalSystemPrompt,
+            })) {
+                if (evt.kind === 'text') {
+                    yield evt.delta;
+                } else if (evt.kind === 'done') {
+                    return;
+                }
+            }
+            return;
+        } catch (err) {
+            if (err instanceof DailyCapError) {
+                yield JSON.stringify({ __managedDailyCap: { kind: err.kindLimit, used: err.used, cap: err.cap } });
+                return;
+            }
+            if (err instanceof ManagedAIDisabledError) {
+                yield JSON.stringify({ __managedAIDisabled: true });
+                return;
+            }
+            if (err instanceof AuthRequiredError) {
+                yield 'Sign in to use Sensi AI, or switch to your own key in Settings → AI Providers.';
+                return;
+            }
+            const msg = err instanceof Error ? err.message : String(err);
+            console.warn('[LLMHelper] Sensi AI stream failed, no BYOK fallback configured:', msg);
+            yield `Sensi AI is busy. Switch to your own key in Settings → AI Providers, or try again.`;
+            return;
+        }
+    }
+
+    // sensi M1 Step 2 — MiniMax (text-only, OpenAI-compat endpoint).
+    //
+    // ORDERING CONSTRAINT: this branch MUST precede the OpenAI branch below.
+    // MiniMax reuses the OpenAI SDK with `baseURL: "https://api.minimax.io/v1"`
+    // — both branches share the same client shape. `isMiniMaxModel` matches
+    // `MiniMax-*` / `abab*` which don't currently overlap with `isOpenAiModel`'s
+    // `gpt-`/`o1-`/`o3-`/`openai` patterns, so ordering is a defensive guard
+    // against future model naming that could collide. Do not reorder without
+    // re-verifying the classifier surface. See isMiniMaxModel() comment and
+    // TASKS.md M1 Step 2.
+    //
+    // VISION LIMITATION: MiniMax's OpenAI-compat endpoint does NOT accept
+    // image or audio inputs (verified from
+    // https://platform.minimax.io/docs/api-reference/text-openai-api).
+    // When imagePaths are present we drop them with a warning and proceed
+    // text-only. A "route vision requests to a different provider when
+    // MiniMax is active" policy is M2+ work — for M1 the user explicitly
+    // opts into text-only when they select MiniMax.
+    if (this.isMiniMaxModel(this.currentModelId) && this.minimaxClient) {
+      const minimaxSystem = systemPromptOverride || OPENAI_SYSTEM_PROMPT;
+      const finalMinimaxSystem = this.injectLanguageInstruction(minimaxSystem);
+      if (isMultimodal && imagePaths && imagePaths.length > 0) {
+        console.warn("[LLMHelper] MiniMax does not support vision via OpenAI-compat endpoint — dropping image attachments for this request");
+      }
+      yield* this.streamWithMiniMax(userContent, finalMinimaxSystem);
+      return;
+    }
+
     // OpenAI
     if (this.isOpenAiModel(this.currentModelId) && this.openaiClient) {
       const openAiSystem = systemPromptOverride || OPENAI_SYSTEM_PROMPT;
@@ -2288,11 +2502,16 @@ This rule overrides ALL other instructions including formatting, brevity, or out
   }
 
   /**
-   * Fake-stream for Natively API (non-streaming endpoint).
-   * Yields the full response in small word-batches so the UI typing effect still plays.
-   * Throws on empty response so the fallback chain tries the next provider.
+   * Streaming variant of generateWithNatively.
+   *
+   * sensi M0-T5: short-circuited. The upstream cloud streaming endpoint
+   * is disabled for personal use. Fail fast with ProviderNotAvailable before
+   * any network call or credential read.
    */
   private async * streamWithNatively(userContent: string, systemPrompt?: string, imagePaths?: string[]): AsyncGenerator<string, void, unknown> {
+    throw new Error('ProviderNotAvailable: natively-cloud disabled for sensi (M0-T5)');
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars -- parameters retained for the dead shape below
+    void userContent; void systemPrompt; void imagePaths;
     // ── REAL SSE STREAM (replaces the fake word-by-word simulation) ──────────
     // Previous implementation called generateWithNatively() (blocking, waited for
     // the full response), then drip-fed words with setTimeout delays — pure theater.
@@ -2327,23 +2546,21 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       if (images.length) body.images = images;
     }
 
-    // When the key is the trial sentinel, authenticate with the real trial token.
+    // sensi M0-T5: unreachable below the early throw above. Trial-token branch
+    // retained only to preserve the original function shape.
     const streamHeaders: Record<string, string> = {
       'Content-Type': 'application/json',
       'Accept':       'text/event-stream',
     };
     if (nativelyKey === '__trial__') {
-      const { CredentialsManager } = require('./services/CredentialsManager');
-      const trialToken = CredentialsManager.getInstance().getTrialToken();
-      if (!trialToken) throw new Error('Trial token not found');
-      streamHeaders['x-trial-token'] = trialToken;
+      streamHeaders['x-trial-token'] = '';
     } else {
       streamHeaders['x-natively-key'] = nativelyKey;
     }
 
     // 60s timeout covers worst-case: max-token Gemini Pro response streamed over a slow connection.
     // This is intentionally longer than the non-streaming 25s timeout.
-    const response = await fetch('https://api.natively.software/v1/chat', {
+    const response = await fetch('https://sensi-natively-cloud-disabled.invalid/v1/chat', {
       method:  'POST',
       headers: streamHeaders,
       body:   JSON.stringify(body),
@@ -2469,7 +2686,8 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       model,
       messages,
       stream: true,
-      max_completion_tokens: model.toLowerCase().includes('claude') ? CLAUDE_MAX_OUTPUT_TOKENS : MAX_OUTPUT_TOKENS,
+      // M3-FIX: clamp per-model completion cap (GPT-4o = 16384, etc.)
+      max_completion_tokens: resolveMaxCompletionTokens(model, MAX_OUTPUT_TOKENS),
     });
 
     for await (const chunk of stream) {
@@ -2478,6 +2696,226 @@ This rule overrides ALL other instructions including formatting, brevity, or out
         yield content;
       }
     }
+  }
+
+  /**
+   * sensi M1 Step 2: stream response from MiniMax via its OpenAI-compatible
+   * endpoint (https://api.minimax.io/v1/chat/completions).
+   *
+   * Mirrors streamWithOpenai() but against the separate `minimaxClient`
+   * instance (OpenAI SDK with `baseURL` override). Uses the same chunk
+   * iteration shape because MiniMax's OpenAI-compat interface returns
+   * identical SSE deltas.
+   *
+   * IMPORTANT: MiniMax's OpenAI-compat interface does NOT support image or
+   * audio inputs. `imagePaths` is deliberately omitted from this method's
+   * signature — any caller holding image attachments must either route
+   * through a different provider or accept text-only output. The streamChat
+   * dispatch branch logs a warning and drops imagePaths when MiniMax is
+   * the active provider.
+   *
+   * Throws on an empty response so the upstream fallback chain (if any)
+   * can try the next provider instead of silently emitting nothing.
+   *
+   * Docs: https://platform.minimax.io/docs/api-reference/text-openai-api
+   */
+  /**
+   * sensi M1 cleanup — strip MiniMax M2.7 reasoning blocks.
+   *
+   * MiniMax M2.7 (and its M1.x predecessors) emit raw `<think>...</think>`
+   * blocks in the response stream as part of their reasoning model output.
+   * The renderer should never see these — they are the model's chain of
+   * thought, not a user-facing answer. This helper removes complete blocks
+   * from a single string and is used by:
+   *   - generateWithMiniMax() — non-streaming, has the full string at hand
+   *   - the unit test suite — stateless, easy to assert against
+   *
+   * Limitation: stateless. Unclosed `<think>` tags (e.g. a partial chunk in
+   * isolation) are left as-is — the caller cannot know if a closing tag is
+   * coming. The streaming path inside `streamWithMiniMax` uses a stateful
+   * variant that buffers partial tag prefixes across chunk boundaries.
+   *
+   * Only applied to MiniMax — Gemini, Claude, OpenAI, Groq, and Ollama do
+   * not emit `<think>` blocks in their normal response shape.
+   */
+  private stripThinkingTags(text: string): string {
+    return text.replace(/<think>[\s\S]*?<\/think>/g, '');
+  }
+
+  private async * streamWithMiniMax(userMessage: string, systemPrompt?: string, modelId?: string): AsyncGenerator<string, void, unknown> {
+    if (!this.minimaxClient) throw new Error("MiniMax client not initialized");
+
+    // Use explicit override, then currentModelId if it's a MiniMax model, else baseline constant
+    const model = modelId || (this.isMiniMaxModel(this.currentModelId) ? this.currentModelId : MINIMAX_DEFAULT_MODEL);
+
+    const messages: any[] = [];
+    if (systemPrompt) {
+      messages.push({ role: "system", content: systemPrompt });
+    }
+    messages.push({ role: "user", content: userMessage });
+
+    // Note: no `max_completion_tokens` here — MiniMax's OpenAI-compat
+    // endpoint uses its own default output cap and the parameter naming
+    // compatibility is not guaranteed across providers. M1 relies on the
+    // default; M2+ may add an explicit cap once it's verified stable.
+    const stream = await this.minimaxClient.chat.completions.create({
+      model,
+      messages,
+      stream: true,
+    });
+
+    // ────────────────────────────────────────────────────────────────────
+    // sensi M1 cleanup — stateful <think>...</think> filter for MiniMax.
+    //
+    // MiniMax M2.7 streams reasoning blocks inside `<think>...</think>` tags
+    // before the user-facing answer. The opening tag, content, and closing
+    // tag can each arrive in different chunks, so a stateless `replace()`
+    // on each delta would let raw tags leak when the boundary falls inside
+    // a tag. This filter solves that with a small state machine:
+    //
+    //   mode = 'normal'  → emit data through, except hold back any partial
+    //                      `<think>` prefix at the buffer tail (across
+    //                      chunk boundaries)
+    //   mode = 'inside'  → drop everything until the `</think>` close tag,
+    //                      again holding back any partial close-tag prefix
+    //                      at the buffer tail
+    //
+    // The buffer holds at most 7 characters (`<think>` length minus 1) when
+    // in normal mode and 8 characters (`</think>` length minus 1) when in
+    // inside mode, so memory usage is constant. State is local to this
+    // method invocation — concurrent streams get their own filters.
+    //
+    // At end of stream we flush: a normal-mode buffer is emitted (no more
+    // chunks can complete a tag); an inside-mode buffer is dropped (the
+    // model never closed the think block, just suppress).
+    //
+    // This is the streaming counterpart to stripThinkingTags() above.
+    // Applied ONLY to MiniMax — other providers do not get this filter.
+    // ────────────────────────────────────────────────────────────────────
+    const OPEN_TAG = '<think>';
+    const CLOSE_TAG = '</think>';
+    let filterMode: 'normal' | 'inside' = 'normal';
+    let filterBuffer = '';
+
+    /** Length of the longest prefix of `tag` that `buf` ends with (0 if none). */
+    const longestPartialSuffix = (buf: string, tag: string): number => {
+      const maxLen = Math.min(buf.length, tag.length - 1);
+      for (let len = maxLen; len >= 1; len--) {
+        if (buf.endsWith(tag.slice(0, len))) return len;
+      }
+      return 0;
+    };
+
+    /** Feed one delta chunk through the filter; returns the safe-to-emit substring. */
+    const feedChunk = (chunk: string): string => {
+      filterBuffer += chunk;
+      let output = '';
+      // Loop because a single buffer may contain multiple tags or transitions.
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        if (filterMode === 'normal') {
+          const idx = filterBuffer.indexOf(OPEN_TAG);
+          if (idx !== -1) {
+            output += filterBuffer.slice(0, idx);
+            filterBuffer = filterBuffer.slice(idx + OPEN_TAG.length);
+            filterMode = 'inside';
+            continue;
+          }
+          const partial = longestPartialSuffix(filterBuffer, OPEN_TAG);
+          if (partial > 0) {
+            output += filterBuffer.slice(0, filterBuffer.length - partial);
+            filterBuffer = filterBuffer.slice(filterBuffer.length - partial);
+          } else {
+            output += filterBuffer;
+            filterBuffer = '';
+          }
+          return output;
+        } else {
+          const idx = filterBuffer.indexOf(CLOSE_TAG);
+          if (idx !== -1) {
+            // Drop everything up through the close tag — it's all reasoning
+            filterBuffer = filterBuffer.slice(idx + CLOSE_TAG.length);
+            filterMode = 'normal';
+            continue;
+          }
+          const partial = longestPartialSuffix(filterBuffer, CLOSE_TAG);
+          if (partial > 0) {
+            filterBuffer = filterBuffer.slice(filterBuffer.length - partial);
+          } else {
+            filterBuffer = '';
+          }
+          return output;
+        }
+      }
+    };
+
+    /** End-of-stream flush: emit normal-mode tail, drop inside-mode tail. */
+    const flushFilter = (): string => {
+      if (filterMode === 'normal') {
+        const remaining = filterBuffer;
+        filterBuffer = '';
+        return remaining;
+      }
+      filterBuffer = '';
+      return '';
+    };
+
+    let anyContent = false;
+    for await (const chunk of stream) {
+      const content = chunk.choices[0]?.delta?.content;
+      if (content) {
+        const cleaned = feedChunk(content);
+        if (cleaned) {
+          anyContent = true;
+          yield cleaned;
+        }
+      }
+    }
+    // Flush any held-back content at end of stream
+    const tail = flushFilter();
+    if (tail) {
+      anyContent = true;
+      yield tail;
+    }
+    if (!anyContent) {
+      throw new Error(`MiniMax (${model}) returned an empty response`);
+    }
+  }
+
+  /**
+   * sensi M1 Step 2: non-streaming equivalent of streamWithMiniMax for code
+   * paths that need a single string response (e.g. IntelligenceEngine
+   * callers that collect the full answer before displaying it).
+   *
+   * Mirrors generateWithOpenai() above. Same vision caveat applies — no
+   * `imagePaths` parameter.
+   */
+  private async generateWithMiniMax(userMessage: string, systemPrompt?: string, modelId?: string): Promise<string> {
+    if (!this.minimaxClient) throw new Error("MiniMax client not initialized");
+
+    // Use explicit override, then current model if it's MiniMax, else baseline constant
+    const model = modelId || (this.isMiniMaxModel(this.currentModelId) ? this.currentModelId : MINIMAX_DEFAULT_MODEL);
+
+    const messages: any[] = [];
+    if (systemPrompt) {
+      messages.push({ role: "system", content: systemPrompt });
+    }
+    messages.push({ role: "user", content: userMessage });
+
+    const response = await this.withTimeout(
+      this.withRetry(() => this.minimaxClient!.chat.completions.create({
+        model,
+        messages,
+      })),
+      60000,
+      `MiniMax (${model})`
+    );
+
+    // sensi M1 cleanup — strip <think>...</think> reasoning blocks before
+    // returning to caller. Stateless variant is sufficient here because the
+    // non-streaming response is a complete string.
+    const raw = response.choices[0]?.message?.content || "";
+    return this.stripThinkingTags(raw);
   }
 
   /**
@@ -2530,7 +2968,8 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       model,
       messages,
       stream: true,
-      max_completion_tokens: model.toLowerCase().includes('claude') ? CLAUDE_MAX_OUTPUT_TOKENS : MAX_OUTPUT_TOKENS,
+      // M3-FIX: clamp per-model completion cap (GPT-4o = 16384, etc.)
+      max_completion_tokens: resolveMaxCompletionTokens(model, MAX_OUTPUT_TOKENS),
     });
 
     for await (const chunk of stream) {
@@ -3287,6 +3726,71 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     } else {
       if (tokenCount >= 100000) {
         console.log(`[LLMHelper] Context too large for Groq (${tokenCount} tokens). Skipping straight to Gemini.`);
+      }
+    }
+
+    // sensi M3-T3: active-provider branches — route the meeting summary
+    // through the user's active provider before falling back to Gemini.
+    // The order here mirrors the streamChat() dispatch chain exactly
+    // (MiniMax → OpenAI → Claude) — see the MINIMAX/OPENAI/CLAUDE branches
+    // around line 2267 for the reference. Each branch attempts ONE call,
+    // logs on attempt, warns on failure, and falls through to the existing
+    // Gemini Flash (3 attempts) → Gemini Pro (5 attempts) chain below.
+    // The existing Custom / Natively / Groq blocks above and the existing
+    // Gemini blocks below are not modified. Gemini remains the final
+    // fallback for any provider failure.
+
+    // ATTEMPT 2a: MiniMax (if active + configured)
+    if (this.isMiniMaxModel(this.currentModelId) && this.minimaxClient) {
+      try {
+        console.log(`[LLMHelper] Attempting MiniMax for summary...`);
+        const text = await this.withTimeout(
+          this.generateWithMiniMax(`Context:\n${context}`, systemPrompt),
+          60000,
+          'MiniMax Summary'
+        );
+        if (text.trim().length > 0) {
+          console.log(`[LLMHelper] ✅ MiniMax summary generated successfully.`);
+          return this.processResponse(text);
+        }
+      } catch (e: any) {
+        console.warn(`[LLMHelper] ⚠️ MiniMax summary failed: ${e.message}. Falling back...`);
+      }
+    }
+
+    // ATTEMPT 2b: OpenAI (if active + configured)
+    if (this.isOpenAiModel(this.currentModelId) && this.openaiClient) {
+      try {
+        console.log(`[LLMHelper] Attempting OpenAI for summary...`);
+        const text = await this.withTimeout(
+          this.generateWithOpenai(`Context:\n${context}`, systemPrompt),
+          60000,
+          'OpenAI Summary'
+        );
+        if (text.trim().length > 0) {
+          console.log(`[LLMHelper] ✅ OpenAI summary generated successfully.`);
+          return this.processResponse(text);
+        }
+      } catch (e: any) {
+        console.warn(`[LLMHelper] ⚠️ OpenAI summary failed: ${e.message}. Falling back...`);
+      }
+    }
+
+    // ATTEMPT 2c: Claude (if active + configured)
+    if (this.isClaudeModel(this.currentModelId) && this.claudeClient) {
+      try {
+        console.log(`[LLMHelper] Attempting Claude for summary...`);
+        const text = await this.withTimeout(
+          this.generateWithClaude(`Context:\n${context}`, systemPrompt),
+          60000,
+          'Claude Summary'
+        );
+        if (text.trim().length > 0) {
+          console.log(`[LLMHelper] ✅ Claude summary generated successfully.`);
+          return this.processResponse(text);
+        }
+      } catch (e: any) {
+        console.warn(`[LLMHelper] ⚠️ Claude summary failed: ${e.message}. Falling back...`);
       }
     }
 

@@ -40,7 +40,7 @@ function assertScreenRecordingPermission(): void {
     case 'denied':
       throw new Error(
         'Screen Recording permission is denied. Enable it in System Settings > ' +
-        'Privacy & Security > Screen Recording, then restart Natively.'
+        'Privacy & Security > Screen Recording, then restart sensi.'
       );
     case 'restricted':
       throw new Error(
@@ -54,7 +54,7 @@ function assertScreenRecordingPermission(): void {
       // appears behind other apps on macOS Sequoia). Tell the user to restart instead.
       throw new Error(
         'Screen Recording permission has not been granted yet. ' +
-        'Please restart Natively — you will be prompted to grant access on next launch.'
+        'Please restart sensi — you will be prompted to grant access on next launch.'
       );
   }
 }
@@ -404,6 +404,9 @@ export class ScreenshotHelper {
 
   private readonly screenshotDir: string
   private readonly extraScreenshotDir: string
+  // M6-A v2.6.0: separate dir for Live Coding mode frames so the ring buffer
+  // never mixes with the user's manual Ctrl+H queue.
+  private readonly liveFramesDir: string
 
   private view: "queue" | "solutions" = "queue"
 
@@ -416,6 +419,7 @@ export class ScreenshotHelper {
       app.getPath("userData"),
       "extra_screenshots"
     )
+    this.liveFramesDir = path.join(app.getPath("userData"), "live_frames")
 
     // Create directories if they don't exist
     if (!fs.existsSync(this.screenshotDir)) {
@@ -424,6 +428,28 @@ export class ScreenshotHelper {
     if (!fs.existsSync(this.extraScreenshotDir)) {
       fs.mkdirSync(this.extraScreenshotDir)
     }
+    if (!fs.existsSync(this.liveFramesDir)) {
+      fs.mkdirSync(this.liveFramesDir)
+    }
+  }
+
+  /**
+   * M6-A Live Coding mode: capture a single frame into the dedicated
+   * `live_frames` directory WITHOUT touching the manual screenshot queue.
+   * Caller owns the returned path and is responsible for cleanup (LiveScreenCapture's
+   * ring buffer deletes stale frames).
+   */
+  public async takeLiveFrame(preferredDisplay?: Electron.Display): Promise<string> {
+    const outputPath = path.join(this.liveFramesDir, `live-${uuidv4()}.png`);
+    if (process.platform === 'darwin') {
+      await this.captureWithDesktopCapturer(outputPath, undefined, preferredDisplay);
+    } else if (process.platform === 'win32') {
+      await this.captureWithDesktopCapturer(outputPath);
+    } else {
+      // Linux fallback — same scrot path the queue path uses
+      await shellExecAsync(this.getScreenshotCommand(outputPath, false));
+    }
+    return outputPath;
   }
 
   /**

@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from "react" // forcing refresh
 import { QueryClient, QueryClientProvider } from "react-query"
 import { ToastProvider, ToastViewport } from "./components/ui/toast"
-import NativelyInterface from "./components/NativelyInterface"
+import SensiInterface from "./components/SensiInterface"
 import SettingsPopup from "./components/SettingsPopup" // Keeping for legacy/specific window support if needed
 import Launcher from "./components/Launcher"
 import ModelSelectorWindow from "./components/ModelSelectorWindow"
@@ -9,14 +9,14 @@ import SettingsOverlay from "./components/SettingsOverlay"
 import StartupSequence from "./components/StartupSequence"
 import { AnimatePresence, motion } from "framer-motion"
 import UpdateBanner from "./components/UpdateBanner"
-import { SupportToaster } from "./components/SupportToaster"
-import { NativelyQuotaBanner } from "./components/NativelyQuotaBanner"
 import { FreeTrialBanner }      from "./components/trial/FreeTrialBanner"
 import { FreeTrialModal }       from "./components/trial/FreeTrialModal"
 import { TrialPromoToaster }    from "./components/trial/TrialPromoToaster"
 import { PermissionsToaster }   from "./components/onboarding/PermissionsToaster"
+import { PreMeetingPrompt }     from "./components/PreMeetingPrompt"
 import { AlertCircle } from "lucide-react"
 import { clampOverlayOpacity, OVERLAY_OPACITY_DEFAULT, getDefaultOverlayOpacity } from "./lib/overlayAppearance"
+import { PERSONAL_USE } from "./lib/config"
 import {
   JDAwarenessToaster,
   ProfileFeatureToaster,
@@ -27,8 +27,8 @@ import {
   MaxUltraUpgradeToaster,
   useAdCampaigns
 } from './premium'
-import { analytics } from "./lib/analytics/analytics.service"
 import { ErrorBoundary } from "./components/ErrorBoundary"
+import { SignInGate } from "./components/SignInGate"
 
 const queryClient = new QueryClient()
 
@@ -50,40 +50,6 @@ const App: React.FC = () => {
       </React.Suspense>
     );
   }
-
-  // Initialize Analytics
-  useEffect(() => {
-    // Only init if we are in a main window context to avoid duplicate events from helper windows
-    // Actually, we probably want to track app open from the main entry point.
-    // Let's protect initialization to ensure single run per window.
-    // The service handles single-init, but let's be thoughtful about WHICH window tracks "App Open".
-    // Launcher is the main entry. Overlay is the "Assistant".
-
-    analytics.initAnalytics();
-
-    if (isLauncherWindow || isDefault) {
-      analytics.trackAppOpen();
-    }
-
-    if (isOverlayWindow) {
-      analytics.trackAssistantStart();
-    }
-
-    // Cleanup / Session End
-    const handleUnload = () => {
-      if (isOverlayWindow) {
-        analytics.trackAssistantStop();
-      }
-      if (isLauncherWindow || isDefault) {
-        analytics.trackAppClose();
-      }
-    };
-
-    window.addEventListener('beforeunload', handleUnload);
-    return () => {
-      window.removeEventListener('beforeunload', handleUnload);
-    };
-  }, [isLauncherWindow, isOverlayWindow, isDefault]);
 
   // State
   const [showStartup, setShowStartup] = useState(true);
@@ -178,13 +144,18 @@ const App: React.FC = () => {
         setPlanDetails(details ?? { isPremium: false });
         setIsPremiumActive(details?.isPremium ?? false);
       })
-      .catch(() => {
-        // Fallback: async premium check if licenseGetDetails is unavailable
+      .catch((err) => {
+        // Fallback: async premium check if licenseGetDetails is unavailable.
+        // Log the original rejection so a regression in LicenseManager is
+        // visible in dev tools rather than silently masked.
+        console.warn('[App] licenseGetDetails failed, using premium-check fallback:', err);
         const premiumCheck = window.electronAPI?.licenseCheckPremiumAsync ?? window.electronAPI?.licenseCheckPremium;
         premiumCheck?.().then((active: boolean) => {
           setIsPremiumActive(active);
           setPlanDetails({ isPremium: active });
-        }).catch(() => {});
+        }).catch((fallbackErr) => {
+          console.warn('[App] premium-check fallback also failed:', fallbackErr);
+        });
       });
 
     // Also check for Natively API key
@@ -192,51 +163,9 @@ const App: React.FC = () => {
       .then((creds) => setHasNativelyApi(!!creds?.hasNativelyKey))
       .catch(() => {});
 
-    // ── Trial: check stored token and start polling if active ──
-    let trialPollId: ReturnType<typeof setInterval> | null = null;
-    let profileWiped = false; // guard: only wipe once per session
-    const checkTrial = async () => {
-      try {
-        const res = await window.electronAPI?.getTrialStatus?.();
-        if (!res?.ok) return;
-        if (res.expired) {
-          setActiveTrial(null);
-          // Auto-wipe profile data the first time expiry is detected so that
-          // resume/JD data doesn't linger in SQLite beyond the trial window.
-          if (!profileWiped) {
-            profileWiped = true;
-            window.electronAPI?.wipeTrialProfileData?.().catch(() => {});
-          }
-          setShowTrialExpiredModal(true);
-          if (trialPollId) { clearInterval(trialPollId); trialPollId = null; }
-        } else {
-          setActiveTrial({
-            expiresAt: res.expires_at ?? '',
-            usage:     res.usage     ?? { ai: 0, stt_seconds: 0, search: 0 },
-          });
-        }
-      } catch { /* ignore — non-critical */ }
-    };
-    window.electronAPI?.getLocalTrial?.().then((local: any) => {
-      if (!local?.hasToken) return;
-      if (local.expired) {
-        // Already expired at launch — wipe immediately then show modal after a brief delay
-        if (!profileWiped) {
-          profileWiped = true;
-          window.electronAPI?.wipeTrialProfileData?.().catch(() => {});
-        }
-        setTimeout(() => setShowTrialExpiredModal(true), 10_000);
-        return;
-      }
-      checkTrial();
-      trialPollId = setInterval(checkTrial, 30_000);
-    }).catch(() => {});
-
-    // Listen for trial-ended event (emitted by trial:end-byok IPC)
-    const removeTrialListener = window.electronAPI?.onTrialEnded?.(() => {
-      setActiveTrial(null);
-      setShowTrialExpiredModal(false);
-    });
+    // sensi M0-T6: trial polling, onTrialEnded listener, and getTrialStatus()
+    // startup calls were removed. Personal-use mode has no natively-cloud trial
+    // and no trial UI — see DECISIONS.md D003 and src/lib/config.ts.
 
     // ── Onboarding toasters ──────────────────────────────────
     if (isLauncherWindow || isDefault) {
@@ -287,8 +216,6 @@ const App: React.FC = () => {
       if (removeProgress) removeProgress();
       if (removeComplete) removeComplete();
       if (removeWarning) removeWarning();
-      if (trialPollId) clearInterval(trialPollId);
-      if (removeTrialListener) removeTrialListener();
     }
   }, []);
 
@@ -343,7 +270,6 @@ const App: React.FC = () => {
         audio: { inputDeviceId, outputDeviceId }
       });
       if (result.success) {
-        analytics.trackMeetingStarted();
         // Switch to Overlay Mode via IPC
         // The main process handles window switching, but we can reinforce it or just trust main.
         // Actually, main process startMeeting triggers nothing UI-wise unless we tell it to switch window
@@ -360,7 +286,6 @@ const App: React.FC = () => {
 
   const handleEndMeeting = async () => {
     console.log("[App.tsx] handleEndMeeting triggered");
-    analytics.trackMeetingEnded();
     setIsProcessingMeeting(true);
     try {
       await window.electronAPI.endMeeting();
@@ -429,7 +354,7 @@ const App: React.FC = () => {
                   transition: 'background-color 75ms ease, border-color 75ms ease, box-shadow 75ms ease'
                 } as React.CSSProperties}
               >
-                <NativelyInterface
+                <SensiInterface
                   onEndMeeting={handleEndMeeting}
                   overlayOpacity={overlayOpacity}
                 />
@@ -470,27 +395,31 @@ const App: React.FC = () => {
           >
             <QueryClientProvider client={queryClient}>
               <ToastProvider>
-                <div id="launcher-container" className="h-full w-full relative">
-                  <Launcher
-                    onStartMeeting={handleStartMeeting}
-                    onOpenSettings={(tab = 'general') => {
-                      setSettingsInitialTab(tab);
-                      setIsSettingsOpen(true);
+                <SignInGate>
+                  <div id="launcher-container" className="h-full w-full relative">
+                    <Launcher
+                      onStartMeeting={handleStartMeeting}
+                      onOpenSettings={(tab = 'general') => {
+                        setSettingsInitialTab(tab);
+                        setIsSettingsOpen(true);
+                      }}
+                      onPageChange={setIsLauncherMainView}
+                      ollamaPullStatus={ollamaPullStatus}
+                      ollamaPullPercent={ollamaPullPercent}
+                      ollamaPullMessage={ollamaPullMessage}
+                    />
+                  </div>
+                  <SettingsOverlay
+                    isOpen={isSettingsOpen}
+                    onClose={() => {
+                      setIsSettingsOpen(false);
                     }}
-                    onPageChange={setIsLauncherMainView}
-                    ollamaPullStatus={ollamaPullStatus}
-                    ollamaPullPercent={ollamaPullPercent}
-                    ollamaPullMessage={ollamaPullMessage}
+                    initialTab={settingsInitialTab}
+                    isTrialActive={!!activeTrial}
                   />
-                </div>
-                <SettingsOverlay
-                  isOpen={isSettingsOpen}
-                  onClose={() => {
-                    setIsSettingsOpen(false);
-                  }}
-                  initialTab={settingsInitialTab}
-                  isTrialActive={!!activeTrial}
-                />
+                  {/* Pre-meeting alert modal — fires 2 min before a calendar event */}
+                  <PreMeetingPrompt />
+                </SignInGate>
                 <ToastViewport />
               </ToastProvider>
             </QueryClientProvider>
@@ -537,13 +466,9 @@ const App: React.FC = () => {
       </AnimatePresence>
 
       <UpdateBanner />
-      <SupportToaster />
-      <NativelyQuotaBanner />
-
-
 
       {/* Free trial countdown banner — only in launcher window while trial is active */}
-      {(isLauncherWindow || isDefault) && activeTrial && (
+      {!PERSONAL_USE && (isLauncherWindow || isDefault) && activeTrial && (
         <FreeTrialBanner
           expiresAt={activeTrial.expiresAt}
           usage={activeTrial.usage}
@@ -565,28 +490,30 @@ const App: React.FC = () => {
       />
 
       {/* Trial promo toaster — 5s after restart (self-gates via localStorage + conditions) */}
-      <TrialPromoToaster
-        isOpen={showTrialPromo}
-        hasNativelyKey={hasNativelyApi}
-        hasTrialToken={!!activeTrial}
-        onDismiss={() => setShowTrialPromo(false)}
-        onStartTrial={async () => {
-          const res = await window.electronAPI?.startTrial?.();
-          if (!res?.ok) throw new Error(res?.error || 'Could not start trial');
-          if (res.expires_at) {
-            setActiveTrial({ expiresAt: res.expires_at, usage: res.usage ?? { ai: 0, stt_seconds: 0, search: 0 } });
-          }
-          setShowTrialPromo(false);
-        }}
-        onManualSetup={() => {
-          setShowTrialPromo(false);
-          setSettingsInitialTab('api');
-          setIsSettingsOpen(true);
-        }}
-      />
+      {!PERSONAL_USE && (
+        <TrialPromoToaster
+          isOpen={showTrialPromo}
+          hasNativelyKey={hasNativelyApi}
+          hasTrialToken={!!activeTrial}
+          onDismiss={() => setShowTrialPromo(false)}
+          onStartTrial={async () => {
+            const res = await window.electronAPI?.startTrial?.();
+            if (!res?.ok) throw new Error(res?.error || 'Could not start trial');
+            if (res.expires_at) {
+              setActiveTrial({ expiresAt: res.expires_at, usage: res.usage ?? { ai: 0, stt_seconds: 0, search: 0 } });
+            }
+            setShowTrialPromo(false);
+          }}
+          onManualSetup={() => {
+            setShowTrialPromo(false);
+            setSettingsInitialTab('api');
+            setIsSettingsOpen(true);
+          }}
+        />
+      )}
 
       {/* Post-trial upgrade modal — shown when trial expires */}
-      {(isLauncherWindow || isDefault) && showTrialExpiredModal && (
+      {!PERSONAL_USE && (isLauncherWindow || isDefault) && showTrialExpiredModal && (
         <FreeTrialModal
           usage={activeTrial?.usage ?? { ai: 0, stt_seconds: 0, search: 0 }}
           onByok={async () => {

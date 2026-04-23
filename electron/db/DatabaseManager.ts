@@ -4,6 +4,110 @@ import path from 'path';
 import { app } from 'electron';
 import fs from 'fs';
 import * as sqliteVec from 'sqlite-vec';
+import { KnowledgeStore } from '../knowledge/KnowledgeStore';
+
+// ─────────────────────────────────────────────────────────────────────────
+// sensi M2-T4 — one-time filename migration: natively.db → sensi.db
+//
+// Exported as a standalone function so it can be unit-tested without
+// spinning up `better-sqlite3` or the `sqlite-vec` extension loader. The
+// migration is best-effort — it MUST NOT throw or crash the app, so
+// every failure path degrades to "proceed with a fresh sensi.db".
+//
+// Contract:
+//   - Fresh install (no old, no new):       returns 'fresh'
+//   - Upgrade (old exists, new does not):   copy + verify + delete old → 'migrated'
+//   - Re-run (old already deleted):          returns 'already-migrated'
+//   - Both exist (orphan):                   logs warning, returns 'both-exist'
+//   - Copy fails (any reason):               logs error, cleans up partial
+//                                            copy, returns 'failed'
+//
+// The copy sequence is explicit copy → verify → delete, NOT an atomic
+// rename, because:
+//   - Windows: atomic rename across different volumes is unreliable
+//   - We want to detect size-mismatch before committing the delete
+//   - If the copy writes a partial file (disk full, interrupted), we can
+//     clean up by unlinking the partial sensi.db before init() creates fresh
+// ─────────────────────────────────────────────────────────────────────────
+
+export type DbMigrationResult =
+    | { status: 'fresh' }
+    | { status: 'already-migrated' }
+    | { status: 'migrated'; bytesCopied: number }
+    | { status: 'both-exist' }
+    | { status: 'failed'; error: string };
+
+export function migrateDbFilename(oldPath: string, newPath: string): DbMigrationResult {
+    const oldExists = fs.existsSync(oldPath);
+    const newExists = fs.existsSync(newPath);
+
+    if (!oldExists && !newExists) {
+        // Fresh install — nothing to migrate
+        return { status: 'fresh' };
+    }
+
+    if (newExists && !oldExists) {
+        // Previous run already migrated, or this is a fresh install that
+        // skipped straight to sensi.db (no pre-M2 history)
+        return { status: 'already-migrated' };
+    }
+
+    if (oldExists && newExists) {
+        // Orphan state — both files present. Don't clobber either; use sensi.db
+        // (the new one) by leaving it in place, and warn so the user can
+        // manually resolve if they care.
+        console.warn(
+            `[DatabaseManager] Both natively.db and sensi.db exist at ${path.dirname(newPath)} — ` +
+            `skipping migration, using sensi.db. Old natively.db left untouched.`
+        );
+        return { status: 'both-exist' };
+    }
+
+    // oldExists && !newExists — perform copy → verify → delete
+    try {
+        const oldSize = fs.statSync(oldPath).size;
+
+        // Step 1: copy
+        fs.copyFileSync(oldPath, newPath);
+
+        // Step 2: verify destination exists
+        if (!fs.existsSync(newPath)) {
+            throw new Error('copy completed but destination file is missing');
+        }
+
+        // Step 3: verify size matches
+        const newSize = fs.statSync(newPath).size;
+        if (newSize !== oldSize) {
+            // Size mismatch: clean up partial copy so init() creates fresh
+            try {
+                fs.unlinkSync(newPath);
+            } catch {
+                /* best-effort cleanup */
+            }
+            throw new Error(`size mismatch after copy (old=${oldSize}, new=${newSize})`);
+        }
+
+        // Step 4: delete the old file — migration committed
+        fs.unlinkSync(oldPath);
+
+        console.log(`[DatabaseManager] Migrated natively.db → sensi.db (${oldSize} bytes)`);
+        return { status: 'migrated', bytesCopied: oldSize };
+    } catch (err) {
+        const errorMsg = err instanceof Error ? err.message : String(err);
+        console.error(
+            `[DatabaseManager] Migration failed, will create fresh sensi.db: ${errorMsg}`
+        );
+        // Clean up any partial sensi.db so init() can create fresh
+        try {
+            if (fs.existsSync(newPath)) {
+                fs.unlinkSync(newPath);
+            }
+        } catch {
+            /* best-effort cleanup */
+        }
+        return { status: 'failed', error: errorMsg };
+    }
+}
 
 // Interfaces for our data objects
 export interface Meeting {
@@ -39,10 +143,19 @@ export class DatabaseManager {
     private db: Database.Database | null = null;
     private dbPath: string;
     private resolvedExtPath: string = '';
+    // sensi M4-T4: lazy KnowledgeStore singleton — one instance per
+    // DatabaseManager, created on first access so a DatabaseManager built
+    // before the kb_ tables exist (e.g. during migrations) still works.
+    private knowledgeStore: KnowledgeStore | null = null;
 
     private constructor() {
         const userDataPath = app.getPath('userData');
-        this.dbPath = path.join(userDataPath, 'natively.db');
+        // sensi M2-T4: renamed from natively.db. The one-time filename migration
+        // runs before init() so any carry-over natively.db from a pre-M2 session
+        // gets copy-verify-deleted to sensi.db. Best-effort; never throws.
+        this.dbPath = path.join(userDataPath, 'sensi.db');
+        const oldDbPath = path.join(userDataPath, 'natively.db');
+        migrateDbFilename(oldDbPath, this.dbPath);
         this.init();
     }
 
@@ -101,6 +214,13 @@ export class DatabaseManager {
             }
 
             this.runMigrations();
+
+            // sensi M4-T1: knowledge-base tables. Sits outside the user_version
+            // migration chain because every DDL is `IF NOT EXISTS` — safe to
+            // run on every launch, cheap if the tables already exist, and
+            // trivially reversible (delete the method and the tables become
+            // orphaned but untouched). See createKnowledgeTables() below.
+            this.createKnowledgeTables();
         } catch (error) {
             console.error('[DatabaseManager] Failed to initialize database:', error);
             throw error;
@@ -431,6 +551,213 @@ export class DatabaseManager {
         }
 
         console.log('[DatabaseManager] Migrations completed.');
+    }
+
+    // ============================================
+    // Knowledge Base Schema (M4-T1)
+    // ============================================
+    // User-provided reference documents (resume, JD, reference PDFs, etc.)
+    // ingested, parsed, chunked, embedded, and made searchable for rolling
+    // context enrichment. See M4-T4 for the KnowledgeStore CRUD layer.
+    //
+    // Naming note: the upstream schema already uses the names `chunks` and
+    // `vec_chunks_{dim}` for meeting-transcript chunking (see v1 and v8
+    // migrations above). The knowledge base uses a `kb_` prefix on all
+    // tables to partition its storage cleanly from meeting storage — these
+    // are conceptually distinct and must never be confused.
+    //
+    // Dimension is HARD-CODED to 768 at the vec0 level. This matches both
+    // nomic-embed-text (Ollama, default) and gemini-embedding-001 (Gemini,
+    // via outputDimensionality: 768 per KNOWLEDGE-FIX-02 / D025).
+    // Providers with different native dimensions (OpenAI text-embedding-3-small
+    // at 1536, Claude at varying dims) cannot be used as the knowledge-base
+    // embedder without dimension reduction. The M4-T5 embedding adapter
+    // enforces this and stores the chosen model name in
+    // `kb_documents.embedding_model` for traceability.
+    //
+    // Idempotent: all three DDL statements use IF NOT EXISTS. Safe to call
+    // on every init(), so this method sits OUTSIDE the user_version
+    // migration chain — keeping the existing chain byte-identical.
+    // ============================================
+    private createKnowledgeTables(): void {
+        if (!this.db) return;
+
+        try {
+            // Scalar metadata + text storage. Renderer never holds these rows
+            // directly; only metadata summaries cross the IPC boundary. See
+            // SECURITY.md B3 (local storage — main only).
+            this.db.exec(`
+                CREATE TABLE IF NOT EXISTS kb_documents (
+                    id               TEXT PRIMARY KEY,
+                    name             TEXT NOT NULL,
+                    mime             TEXT NOT NULL,
+                    bytes            INTEGER NOT NULL,
+                    embedding_model  TEXT NOT NULL,
+                    embedding_dim    INTEGER NOT NULL,
+                    pinned           INTEGER NOT NULL DEFAULT 0,
+                    pinned_at        TEXT,
+                    ingested_at      TEXT NOT NULL DEFAULT (datetime('now'))
+                );
+
+                CREATE TABLE IF NOT EXISTS kb_chunks (
+                    id           TEXT PRIMARY KEY,
+                    doc_id       TEXT NOT NULL
+                                 REFERENCES kb_documents(id) ON DELETE CASCADE,
+                    chunk_index  INTEGER NOT NULL,
+                    text         TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_kb_chunks_doc_id
+                    ON kb_chunks(doc_id);
+
+                -- sensi M7 / KNOWLEDGE-02 (v2.9.0): per-meeting document binding.
+                -- A doc can be attached to zero or more events. Retrieval prefers
+                -- docs matching the active event_id, falls back to pinned + global
+                -- if no event-scoped docs exist or if cosine distance is too high.
+                -- event_id is opaque (TEXT) — typically the Google Calendar event
+                -- id, but we don't constrain FK because events aren't mirrored
+                -- into our own DB. ON DELETE CASCADE on doc_id keeps the join
+                -- table clean when a doc is deleted via KnowledgeSettings.
+                CREATE TABLE IF NOT EXISTS kb_document_events (
+                    doc_id       TEXT NOT NULL
+                                 REFERENCES kb_documents(id) ON DELETE CASCADE,
+                    event_id     TEXT NOT NULL,
+                    attached_at  TEXT NOT NULL DEFAULT (datetime('now')),
+                    PRIMARY KEY (doc_id, event_id)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_kb_document_events_event_id
+                    ON kb_document_events(event_id);
+                CREATE INDEX IF NOT EXISTS idx_kb_document_events_doc_id
+                    ON kb_document_events(doc_id);
+
+                -- sensi M7 / PERSONA-01 (v2.10.0): lightweight persona store.
+                -- PERSONA-02 (v2.11.0) adds event_id — nullable for resumes
+                -- (global), populated for JDs (bound to a calendar event).
+                -- json_data holds the Zod-validated extraction output so the
+                -- schema can evolve without DB migrations — PersonaManager
+                -- owns the canonical shape. History is retained (every upload
+                -- writes a new row) for audit; only the LATEST per (kind,
+                -- event_id) gets injected into LLM calls.
+                CREATE TABLE IF NOT EXISTS user_persona (
+                    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                    version      TEXT NOT NULL DEFAULT 'v1',
+                    kind         TEXT NOT NULL,
+                    source_name  TEXT,
+                    event_id     TEXT,
+                    json_data    TEXT NOT NULL,
+                    created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+                    updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_user_persona_kind_updated
+                    ON user_persona(kind, updated_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_user_persona_kind_event
+                    ON user_persona(kind, event_id, updated_at DESC);
+            `);
+
+            // sensi M7 / PERSONA-02: defensive ALTER for users upgrading from
+            // v2.10.0 where the table was created WITHOUT event_id. SQLite
+            // pre-3.35 lacks `ADD COLUMN IF NOT EXISTS`; on a fresh v2.11
+            // install the column is already present and this ALTER throws
+            // "duplicate column" which we swallow.
+            try {
+                this.db.exec('ALTER TABLE user_persona ADD COLUMN event_id TEXT');
+            } catch (e) {
+                const msg = (e as Error)?.message ?? '';
+                if (!/duplicate column/i.test(msg)) {
+                    console.warn('[DatabaseManager] user_persona event_id ALTER unexpected:', msg);
+                }
+            }
+        } catch (e) {
+            console.error('[DatabaseManager] Failed to create knowledge base scalar tables:', e);
+            return;
+        }
+
+        // Vector virtual table — hard-coded to 768 dimensions. Wrapped in its
+        // own try/catch because sqlite-vec may have failed to load earlier
+        // (see loadExtension() call in init()). If it did, the scalar tables
+        // above still support non-retrieval CRUD (list, pin, delete) and the
+        // M4-T5 embedding adapter will surface a clear error to the user at
+        // ingest time. The `chunk_id INTEGER PRIMARY KEY` column is a rowid
+        // alias — this matches the idiomatic pattern from the v3/v4 meeting
+        // vec0 migrations above and avoids better-sqlite3 binding type
+        // strictness on implicit rowids.
+        try {
+            this.db.exec(`
+                CREATE VIRTUAL TABLE IF NOT EXISTS vec_kb_chunks USING vec0(
+                    chunk_id INTEGER PRIMARY KEY,
+                    embedding float[768]
+                );
+            `);
+            console.log('[DatabaseManager] Knowledge base schema ready (kb_documents, kb_chunks, vec_kb_chunks)');
+        } catch (e) {
+            console.error('[DatabaseManager] Failed to create vec_kb_chunks virtual table (sqlite-vec may not be loaded):', e);
+            console.warn('[DatabaseManager] Knowledge base retrieval will be unavailable until sqlite-vec loads successfully');
+        }
+    }
+
+    /**
+     * sensi M4-T4: lazy accessor for the KnowledgeStore. Returns a cached
+     * instance scoped to this DatabaseManager's live `better-sqlite3`
+     * handle. Throws if the DB is not initialized (shouldn't happen —
+     * DatabaseManager's constructor calls init() before returning — but
+     * guards against callers that hold a reference across a theoretical
+     * future reset).
+     */
+    public getKnowledgeStore(): KnowledgeStore {
+        if (!this.db) {
+            throw new Error(
+                '[DatabaseManager] getKnowledgeStore(): database not initialized'
+            );
+        }
+        if (!this.knowledgeStore) {
+            this.knowledgeStore = new KnowledgeStore(this.db);
+        }
+        return this.knowledgeStore;
+    }
+
+    // sensi M4-T8: lazy KnowledgeOrchestrator singleton. Composes the
+    // M4-T4 KnowledgeStore + a fresh M4-T5 EmbeddingAdapter and caches
+    // the M4-T6 KnowledgeOrchestrator for the lifetime of this
+    // DatabaseManager. One instance, reused across all IPC handlers and
+    // the live-assist knowledge hook.
+    //
+    // Naming: AppState in main.ts also has a `getKnowledgeOrchestrator`
+    // accessor (legacy upstream premium feature, returns undefined).
+    // These are DIFFERENT singletons: DatabaseManager owns the real
+    // M4-T6 orchestrator; AppState owns the stale premium field that's
+    // never initialized and always returns undefined. See D021 for the
+    // naming rationale.
+    //
+    // Lazy import of KnowledgeOrchestrator / EmbeddingAdapter to avoid
+    // pulling pdfjs-dist into DatabaseManager's load graph — pdf-parse
+    // is transitively imported via parsers.ts, and that load path
+    // should only happen when the knowledge subsystem is actually used,
+    // not at every DatabaseManager construction.
+    private knowledgeOrchestrator: import('../knowledge/KnowledgeOrchestrator').KnowledgeOrchestrator | null = null;
+
+    public getKnowledgeOrchestrator(): import('../knowledge/KnowledgeOrchestrator').KnowledgeOrchestrator {
+        if (!this.db) {
+            throw new Error(
+                '[DatabaseManager] getKnowledgeOrchestrator(): database not initialized'
+            );
+        }
+        if (!this.knowledgeOrchestrator) {
+            // eslint-disable-next-line @typescript-eslint/no-require-imports
+            const { KnowledgeOrchestrator: Orch } = require('../knowledge/KnowledgeOrchestrator');
+            // eslint-disable-next-line @typescript-eslint/no-require-imports
+            const { EmbeddingAdapter } = require('../knowledge/EmbeddingAdapter');
+            // M4-T10: pass the app userData directory so the orchestrator
+            // can write pre-import backup files alongside sensi.db.
+            const backupDir = app.getPath('userData');
+            this.knowledgeOrchestrator = new Orch({
+                store: this.getKnowledgeStore(),
+                adapter: new EmbeddingAdapter(),
+                backupDir,
+            });
+        }
+        return this.knowledgeOrchestrator!;
     }
 
     // ============================================
@@ -956,7 +1283,7 @@ export class DatabaseManager {
 
         const summaryMarkdown = `# Overview
 
-Natively is a real-time AI meeting assistant designed to help you stay focused, informed, and fast-moving during calls. Get live insights while you speak, instant answers to questions, and structured notes after every meeting.
+sensi is a real-time AI meeting assistant designed to help you stay focused, informed, and fast-moving during calls. Get live insights while you speak, instant answers to questions, and structured notes after every meeting.
 
 # Getting Started
 
@@ -966,7 +1293,7 @@ Join a scheduled meeting and start directly from the meeting notification.
 
 ### During a Meeting
 - Use the **five quick action buttons** for real-time assistance
-- Show or hide Natively at any time:
+- Show or hide sensi at any time:
   - **Mac**: Cmd + B
   - **Windows**: Ctrl + B
 - Move the widget anywhere on your screen by hovering over the top pill and dragging
@@ -984,7 +1311,7 @@ Join a scheduled meeting and start directly from the meeting notification.
 - **Smart Note Taking**: Automatically captures key points, action items, and structured summaries.
 - **Summary**: A concise high-level brief of the entire meeting.
 - **Transcript**: Full real-time speech-to-text transcript, available during and after the call.
-- **Usage**: Track your interaction history and see how Natively assisted you.
+- **Usage**: Track your interaction history and see how sensi assisted you.
 
 ## Live Insights
 Click **Live Insights** during a call to view:
@@ -1001,7 +1328,7 @@ Click **Live Insights** during a call to view:
 - **Full Screen Screenshot**: Cmd + H
 - **Selective Screenshot**: Cmd + Shift + H
 
-# Making the Most of Natively
+# Making the Most of sensi
 
 ### Custom Context
 Upload resumes, project briefs, sales scripts, or other documents to tailor responses to your workflow. (coming soon).
@@ -1012,7 +1339,7 @@ Go to **Settings → Language Preferences** to:
 - Enable real-time translation during calls
 
 ### Undetectability
-Unlock the **Undetectability** add-on to keep Natively invisible during screen sharing.
+Unlock the **Undetectability** add-on to keep sensi invisible during screen sharing.
 
 # Interface Basics
 
@@ -1058,7 +1385,7 @@ If you don’t already have one, follow the steps below to create it.
 - Select **JSON**
 - Download the file
 
-**Once downloaded, return to Settings → Credentials in Natively and select this file to complete setup.**
+**Once downloaded, return to Settings → Credentials in sensi and select this file to complete setup.**
 
 # Free Google Cloud Credit (New Users)
 
@@ -1080,17 +1407,17 @@ natively.contact@gmail.com`;
 
         const demoMeeting: Meeting = {
             id: demoId,
-            title: "Natively Demo & Guide",
+            title: "sensi Demo & Guide",
             date: today.toISOString(),
             duration: "5:00",
-            summary: "Complete guide to using Natively - your real-time AI meeting assistant.",
+            summary: "Complete guide to using sensi - your real-time AI meeting assistant.",
             detailedSummary: {
                 overview: summaryMarkdown,
                 actionItems: [],
                 keyPoints: []
             },
             transcript: [
-                { speaker: 'interviewer', text: "Welcome to Natively! Let me show you how it works.", timestamp: 0 },
+                { speaker: 'interviewer', text: "Welcome to sensi! Let me show you how it works.", timestamp: 0 },
                 { speaker: 'user', text: "Thanks! I'm excited to try it out.", timestamp: 5000 },
                 { speaker: 'interviewer', text: "You have 5 quick action buttons. 'What to answer' listens to the conversation and suggests what you should say.", timestamp: 10000 },
                 { speaker: 'user', text: "That sounds helpful for interviews.", timestamp: 18000 },
@@ -1100,13 +1427,13 @@ natively.contact@gmail.com`;
                 { speaker: 'interviewer', text: "'Follow Up Questions' suggests questions you can ask. 'Answer' lets you speak a question and get an instant response.", timestamp: 35000 },
                 { speaker: 'user', text: "Can I take screenshots during calls?", timestamp: 45000 },
                 { speaker: 'interviewer', text: "Yes! Press Cmd+H for full screen or Cmd+Shift+H to select an area. The AI will analyze it and help you.", timestamp: 50000 },
-                { speaker: 'user', text: "How do I hide Natively during screen share?", timestamp: 60000 },
+                { speaker: 'user', text: "How do I hide sensi during screen share?", timestamp: 60000 },
                 { speaker: 'interviewer', text: "Press Cmd+B to toggle visibility anytime. You can also enable undetectable mode in settings.", timestamp: 65000 },
                 { speaker: 'user', text: "This is amazing. What happens after the call?", timestamp: 75000 },
                 { speaker: 'interviewer', text: "You get detailed meeting notes with action items, key points, full transcript, and a log of all AI interactions.", timestamp: 80000 }
             ],
             usage: [
-                { type: 'assist', timestamp: 15000, question: 'What features does Natively have?', answer: 'Natively offers 5 quick action buttons, screenshot analysis, real-time transcription, and comprehensive meeting notes.' },
+                { type: 'assist', timestamp: 15000, question: 'What features does sensi have?', answer: 'sensi offers 5 quick action buttons, screenshot analysis, real-time transcription, and comprehensive meeting notes.' },
                 { type: 'followup', timestamp: 40000, question: 'How do the action buttons work?', answer: 'Each button serves a specific purpose: suggest answers, clarify questions, recap conversations, generate follow-up questions, or get instant voice-to-answer responses.' }
             ],
             isProcessed: true

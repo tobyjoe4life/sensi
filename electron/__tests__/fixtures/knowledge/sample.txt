@@ -1,0 +1,6 @@
+Plain text fixture for sensi M4-T2 parser tests.
+
+Line one of the body.
+Line two of the body.
+
+A second paragraph after a single blank line.

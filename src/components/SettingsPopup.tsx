@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useLayoutEffect, useRef } from 'react';
-import { MessageSquare, Link, Camera, Zap, Heart, User } from 'lucide-react';
+import { MessageSquare, Link, Camera, Zap, Heart, User, Eye, Brain } from 'lucide-react';
 import { useShortcuts } from '../hooks/useShortcuts';
 import { useResolvedTheme } from '../hooks/useResolvedTheme';
 
@@ -125,6 +125,27 @@ const SettingsPopup = () => {
         return stored !== 'false'; // Default to true if not set
     });
 
+    // v2.4.10: Auto-answer toggle mirror (M5-T8). Backed by the same
+    // persisted setting the main Settings > General panel edits.
+    const [rollingMode, setRollingMode] = useState<'off' | 'on-silence' | 'on-demand'>('off');
+    useEffect(() => {
+        // @ts-ignore
+        window.electronAPI?.getRollingTriggerMode?.().then((mode: string) => {
+            if (mode === 'off' || mode === 'on-silence' || mode === 'on-demand') {
+                setRollingMode(mode as any);
+            }
+        }).catch(() => { });
+        // @ts-ignore
+        if (!window.electronAPI?.onRollingTriggerModeChanged) return;
+        // @ts-ignore
+        const unsubscribe = window.electronAPI.onRollingTriggerModeChanged((mode: string) => {
+            if (mode === 'off' || mode === 'on-silence' || mode === 'on-demand') {
+                setRollingMode(mode as any);
+            }
+        });
+        return () => unsubscribe();
+    }, []);
+
     useEffect(() => {
         const handleStorage = () => {
             const stored = localStorage.getItem('natively_interviewer_transcript');
@@ -148,6 +169,22 @@ const SettingsPopup = () => {
             setActionButtonModeState(mode);
         });
         return () => unsubscribe();
+    }, []);
+
+    // v2.6.2: Live Coding + Online Assessment mirrors in the overlay popup.
+    // Both are backed by the same SettingsManager fields the main Settings
+    // → General panel uses, so they stay in sync cross-window.
+    const [liveCodingMode, setLiveCodingMode] = useState(false);
+    const [assessmentMode, setAssessmentMode] = useState(false);
+    useEffect(() => {
+        window.electronAPI?.getLiveCodingModeEnabled?.().then((v: boolean) => setLiveCodingMode(!!v)).catch(() => { });
+        window.electronAPI?.getOnlineAssessmentModeEnabled?.().then((v: boolean) => setAssessmentMode(!!v)).catch(() => { });
+    }, []);
+    useEffect(() => {
+        const unsub = window.electronAPI?.onOnlineAssessmentModeChanged?.((enabled: boolean) => {
+            setAssessmentMode(!!enabled);
+        });
+        return () => unsub?.();
     }, []);
 
     const contentRef = useRef<HTMLDivElement>(null);
@@ -191,7 +228,7 @@ const SettingsPopup = () => {
 
     return (
         <div className="w-fit h-fit bg-transparent flex flex-col">
-            <div ref={contentRef} className={`w-[200px] max-h-[280px] backdrop-blur-md border rounded-[16px] overflow-hidden shadow-2xl p-2 flex flex-col animate-scale-in origin-top-left ${popupPanelClass}`}>
+            <div ref={contentRef} className={`w-[240px] max-h-[320px] backdrop-blur-md border rounded-[16px] overflow-hidden shadow-2xl p-2 flex flex-col animate-scale-in origin-top-left ${popupPanelClass}`}>
                 <div className="flex-1 overflow-y-auto scrollbar-hide flex flex-col min-h-0">
 
                 {/* Undetectability */}
@@ -212,7 +249,7 @@ const SettingsPopup = () => {
                             localStorage.setItem('natively_undetectable', String(newState));
                             window.electronAPI?.setUndetectable(newState);
                         }}
-                        className={`w-[30px] h-[18px] rounded-full p-[1.5px] transition-all duration-300 ease-spring active:scale-[0.92] ${isUndetectable
+                        className={`w-[30px] h-[18px] rounded-full p-[1.5px] transition-all duration-300 ease-spring active:scale-[0.92] focus:outline-none focus-visible:ring-1 focus-visible:ring-emerald-500/40 ${isUndetectable
                             ? (isLightTheme ? 'bg-slate-900 shadow-[0_2px_8px_rgba(15,23,42,0.18)]' : 'bg-white shadow-[0_2px_8px_rgba(255,255,255,0.2)]')
                             : defaultToggleTrackClass}`}
                     >
@@ -221,8 +258,8 @@ const SettingsPopup = () => {
                 </div>
 
 
-                {/* Groq (Fast Text) Toggle — enabled with Groq key OR Natively API key */}
-                <div className={`flex items-center justify-between px-3 py-2 rounded-lg transition-colors duration-200 group ${!(hasStoredKey.groq || hasStoredKey.natively) ? 'opacity-50 grayscale cursor-not-allowed' : `${itemHoverClass} cursor-default`}`} title={!(hasStoredKey.groq || hasStoredKey.natively) ? "Requires Groq or Natively API key" : ""}>
+                {/* Groq (Fast Text) Toggle — enabled with Groq key */}
+                <div className={`flex items-center justify-between px-3 py-2 rounded-lg transition-colors duration-200 group ${!(hasStoredKey.groq || hasStoredKey.natively) ? 'opacity-50 grayscale cursor-not-allowed' : `${itemHoverClass} cursor-default`}`} title={!(hasStoredKey.groq || hasStoredKey.natively) ? "Requires Groq API key" : ""}>
                     <div className="flex items-center gap-3">
                         <Zap
                             className={`w-4 h-4 transition-colors ${useGroqFastText ? 'text-orange-500' : iconInactiveClass}`}
@@ -235,7 +272,7 @@ const SettingsPopup = () => {
                             if (!(hasStoredKey.groq || hasStoredKey.natively)) return;
                             setUseGroqFastText(!useGroqFastText);
                         }}
-                        className={`w-[30px] h-[18px] rounded-full p-[1.5px] transition-all duration-300 ease-spring active:scale-[0.92] ${useGroqFastText ? 'bg-orange-500 shadow-[0_2px_10px_rgba(249,115,22,0.3)]' : defaultToggleTrackClass}`}
+                        className={`w-[30px] h-[18px] rounded-full p-[1.5px] transition-all duration-300 ease-spring active:scale-[0.92] focus:outline-none focus-visible:ring-1 focus-visible:ring-emerald-500/40 ${useGroqFastText ? 'bg-orange-500 shadow-[0_2px_10px_rgba(249,115,22,0.3)]' : defaultToggleTrackClass}`}
                         disabled={!(hasStoredKey.groq || hasStoredKey.natively)}
                     >
                         <div className={`w-[15px] h-[15px] rounded-full transition-transform duration-300 ease-spring ${toggleKnobClass} ${useGroqFastText ? 'translate-x-[12px]' : 'translate-x-0'}`} />
@@ -259,9 +296,31 @@ const SettingsPopup = () => {
                             // Dispatch event for same-window listeners
                             window.dispatchEvent(new Event('storage'));
                         }}
-                        className={`w-[30px] h-[18px] rounded-full p-[1.5px] transition-all duration-300 ease-spring active:scale-[0.92] ${showTranscript ? 'bg-emerald-500 shadow-[0_2px_10px_rgba(16,185,129,0.3)]' : defaultToggleTrackClass}`}
+                        className={`w-[30px] h-[18px] rounded-full p-[1.5px] transition-all duration-300 ease-spring active:scale-[0.92] focus:outline-none focus-visible:ring-1 focus-visible:ring-emerald-500/40 ${showTranscript ? 'bg-emerald-500 shadow-[0_2px_10px_rgba(16,185,129,0.3)]' : defaultToggleTrackClass}`}
                     >
                         <div className={`w-[15px] h-[15px] rounded-full transition-transform duration-300 ease-spring ${toggleKnobClass} ${showTranscript ? 'translate-x-[12px]' : 'translate-x-0'}`} />
+                    </button>
+                </div>
+
+                {/* Auto-answer Toggle — mirrors Settings > General. Off = manual (click Answer), On = auto-fire after interviewer pauses. */}
+                <div className={`flex items-center justify-between px-3 py-2 rounded-lg transition-colors duration-200 group cursor-default ${itemHoverClass}`}>
+                    <div className="flex items-center gap-3">
+                        <Zap
+                            className={`w-3.5 h-3.5 transition-colors ${rollingMode === 'on-silence' ? 'text-emerald-400' : iconInactiveClass}`}
+                            fill={rollingMode === 'on-silence' ? "currentColor" : "none"}
+                        />
+                        <span className={`text-[12px] font-medium transition-colors ${rollingMode === 'on-silence' ? (isLightTheme ? 'text-slate-950' : 'text-white') : labelInactiveClass}`}>Auto-answer</span>
+                    </div>
+                    <button
+                        onClick={() => {
+                            const newMode: 'off' | 'on-silence' = rollingMode === 'on-silence' ? 'off' : 'on-silence';
+                            setRollingMode(newMode);
+                            // @ts-ignore
+                            window.electronAPI?.setRollingTriggerMode?.(newMode).catch(() => { });
+                        }}
+                        className={`w-[30px] h-[18px] rounded-full p-[1.5px] transition-all duration-300 ease-spring active:scale-[0.92] focus:outline-none focus-visible:ring-1 focus-visible:ring-emerald-500/40 ${rollingMode === 'on-silence' ? 'bg-emerald-500 shadow-[0_2px_10px_rgba(16,185,129,0.3)]' : defaultToggleTrackClass}`}
+                    >
+                        <div className={`w-[15px] h-[15px] rounded-full transition-transform duration-300 ease-spring ${toggleKnobClass} ${rollingMode === 'on-silence' ? 'translate-x-[12px]' : 'translate-x-0'}`} />
                     </button>
                 </div>
 
@@ -294,9 +353,50 @@ const SettingsPopup = () => {
                                 await window.electronAPI?.setActionButtonMode?.(newMode);
                             } catch (e) { console.error(e); }
                         }}
-                        className={`w-[30px] h-[18px] rounded-full p-[1.5px] transition-all duration-300 ease-spring active:scale-[0.92] ${actionButtonMode === 'brainstorm' ? 'bg-violet-500 shadow-[0_2px_10px_rgba(139,92,246,0.3)]' : defaultToggleTrackClass}`}
+                        className={`w-[30px] h-[18px] rounded-full p-[1.5px] transition-all duration-300 ease-spring active:scale-[0.92] focus:outline-none focus-visible:ring-1 focus-visible:ring-emerald-500/40 ${actionButtonMode === 'brainstorm' ? 'bg-violet-500 shadow-[0_2px_10px_rgba(139,92,246,0.3)]' : defaultToggleTrackClass}`}
                     >
                         <div className={`w-[15px] h-[15px] rounded-full transition-transform duration-300 ease-spring ${toggleKnobClass} ${actionButtonMode === 'brainstorm' ? 'translate-x-[12px]' : 'translate-x-0'}`} />
+                    </button>
+                </div>
+
+                {/* v2.6.2: Live Coding Mode — mirrors Settings → General toggle. */}
+                <div className={`flex items-center justify-between px-3 py-2 rounded-lg transition-colors duration-200 group cursor-default ${itemHoverClass}`}>
+                    <div className="flex items-center gap-3">
+                        <Eye
+                            className={`w-3.5 h-3.5 transition-colors ${liveCodingMode ? 'text-[var(--accent-primary)]' : iconInactiveClass}`}
+                            fill={liveCodingMode ? 'currentColor' : 'none'}
+                        />
+                        <span className={`text-[12px] font-medium transition-colors ${liveCodingMode ? (isLightTheme ? 'text-slate-950' : 'text-white') : labelInactiveClass}`}>Live Coding</span>
+                    </div>
+                    <button
+                        onClick={async () => {
+                            const next = !liveCodingMode;
+                            setLiveCodingMode(next);
+                            try { await window.electronAPI?.setLiveCodingModeEnabled?.(next); } catch (e) { console.error(e); }
+                        }}
+                        className={`w-[30px] h-[18px] rounded-full p-[1.5px] transition-all duration-300 ease-spring active:scale-[0.92] focus:outline-none focus-visible:ring-1 focus-visible:ring-emerald-500/40 ${liveCodingMode ? 'bg-[var(--accent-primary)] shadow-[0_2px_10px_rgba(184,145,92,0.35)]' : defaultToggleTrackClass}`}
+                    >
+                        <div className={`w-[15px] h-[15px] rounded-full transition-transform duration-300 ease-spring ${toggleKnobClass} ${liveCodingMode ? 'translate-x-[12px]' : 'translate-x-0'}`} />
+                    </button>
+                </div>
+
+                {/* v2.6.2: Online Assessment Mode — flips "What to answer?" into full-solution mode with a fresh screenshot. */}
+                <div className={`flex items-center justify-between px-3 py-2 rounded-lg transition-colors duration-200 group cursor-default ${itemHoverClass}`}>
+                    <div className="flex items-center gap-3">
+                        <Brain
+                            className={`w-3.5 h-3.5 transition-colors ${assessmentMode ? 'text-[var(--accent-primary)]' : iconInactiveClass}`}
+                        />
+                        <span className={`text-[12px] font-medium transition-colors ${assessmentMode ? (isLightTheme ? 'text-slate-950' : 'text-white') : labelInactiveClass}`}>Assessment</span>
+                    </div>
+                    <button
+                        onClick={async () => {
+                            const next = !assessmentMode;
+                            setAssessmentMode(next);
+                            try { await window.electronAPI?.setOnlineAssessmentModeEnabled?.(next); } catch (e) { console.error(e); }
+                        }}
+                        className={`w-[30px] h-[18px] rounded-full p-[1.5px] transition-all duration-300 ease-spring active:scale-[0.92] focus:outline-none focus-visible:ring-1 focus-visible:ring-emerald-500/40 ${assessmentMode ? 'bg-[var(--accent-primary)] shadow-[0_2px_10px_rgba(184,145,92,0.35)]' : defaultToggleTrackClass}`}
+                    >
+                        <div className={`w-[15px] h-[15px] rounded-full transition-transform duration-300 ease-spring ${toggleKnobClass} ${assessmentMode ? 'translate-x-[12px]' : 'translate-x-0'}`} />
                     </button>
                 </div>
 
@@ -320,7 +420,7 @@ const SettingsPopup = () => {
                                     await window.electronAPI?.profileSetMode?.(newState);
                                 } catch (e) { console.error(e); }
                             }}
-                            className={`w-[30px] h-[18px] rounded-full p-[1.5px] transition-all duration-300 ease-spring active:scale-[0.92] ${profileMode && isPremium ? 'bg-accent-primary shadow-[0_2px_10px_rgba(var(--color-accent-primary),0.3)]' : defaultToggleTrackClass}`}
+                            className={`w-[30px] h-[18px] rounded-full p-[1.5px] transition-all duration-300 ease-spring active:scale-[0.92] focus:outline-none focus-visible:ring-1 focus-visible:ring-emerald-500/40 ${profileMode && isPremium ? 'bg-accent-primary shadow-[0_2px_10px_rgba(var(--color-accent-primary),0.3)]' : defaultToggleTrackClass}`}
                             disabled={!isPremium}
                         >
                             <div className={`w-[15px] h-[15px] rounded-full transition-transform duration-300 ease-spring ${toggleKnobClass} ${profileMode && isPremium ? 'translate-x-[12px]' : 'translate-x-0'}`} />
@@ -330,7 +430,7 @@ const SettingsPopup = () => {
 
                 <div className={`h-px my-0.5 mx-2 ${dividerClass}`} />
 
-                {/* Show/Hide Natively */}
+                {/* Show/Hide sensi */}
                 <div className={`flex items-center justify-between px-3 py-2 rounded-lg transition-colors duration-200 group interaction-base interaction-press ${itemHoverClass}`}>
                     <div className="flex items-center gap-3">
                         <MessageSquare className={`w-3.5 h-3.5 transition-colors ${iconInactiveClass}`} />
@@ -364,18 +464,14 @@ const SettingsPopup = () => {
 
                 <div className={`h-px my-0.5 mx-2 ${dividerClass}`} />
 
-                {/* Donate */}
-                <div
-                    // @ts-ignore
-                    onClick={() => window.electronAPI.openExternal('https://buymeacoffee.com/evinjohnn')}
-                    className="flex items-center justify-between px-3 py-2 hover:bg-pink-500/10 rounded-lg transition-colors duration-200 group interaction-base interaction-press"
-                >
+                {/* sensi M2-T3: upstream donate block removed */}
+                <div style={{ display: 'none' }}>
                     <div className="flex items-center gap-3">
-                        <Heart className="w-3.5 h-3.5 text-pink-400 group-hover:fill-pink-400 transition-all duration-300" />
-                        <span className={`text-[12px] transition-colors ${isLightTheme ? 'text-slate-700 group-hover:text-pink-700' : 'text-slate-400 group-hover:text-pink-100'}`}>Donate</span>
+                        <Heart className="w-3.5 h-3.5 text-pink-400" />
+                        <span className="text-[12px]">Donate</span>
                     </div>
-                    <div className="opacity-60 group-hover:opacity-100 transition-opacity">
-                        <Link className={`w-3 h-3 group-hover:text-pink-400 ${isLightTheme ? 'text-slate-600' : 'text-slate-500'}`} />
+                    <div className="opacity-60">
+                        <Link className="w-3 h-3" />
                     </div>
                 </div>
 

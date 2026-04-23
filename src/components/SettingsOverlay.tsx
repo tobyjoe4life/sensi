@@ -6,13 +6,15 @@ import {
     Camera, RotateCcw, Eye, Layout, MessageSquare, Crop,
     ChevronDown, ChevronUp, Check, BadgeCheck, Power, Palette, Calendar, Ghost, Sun, Moon, RefreshCw, Info, Globe, FlaskConical, Terminal, Settings, Activity, ExternalLink, Trash2,
     Sparkles, Pencil, Briefcase, Building2, Search, MapPin, CheckCircle, HelpCircle, Zap, SlidersHorizontal, PointerOff,
-    Star, AlertCircle, Gift
+    Star, AlertCircle, Gift, BookOpen, UserCircle
 } from 'lucide-react';
-import { analytics } from '../lib/analytics/analytics.service';
 import { AboutSection } from './AboutSection';
 import { HelpSettings } from './settings/HelpSettings';
+import { GoogleCalendarSettings } from './settings/GoogleCalendarSettings';
 import { AIProvidersSettings } from './settings/AIProvidersSettings';
-import { NativelyApiSettings } from './settings/NativelyApiSettings';
+import { KnowledgeSettings } from './settings/KnowledgeSettings';
+import { PersonaSettings } from './settings/PersonaSettings';
+import { AccountSettings } from './settings/AccountSettings';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useShortcuts } from '../hooks/useShortcuts';
 import { useResolvedTheme } from '../hooks/useResolvedTheme';
@@ -26,6 +28,8 @@ import {
 import { KeyRecorder } from './ui/KeyRecorder';
 import { ProfileVisualizer, PremiumUpgradeModal } from '../premium';
 import icon from './icon.png';
+import { SensiMark } from './SensiLogoMark';
+import { PERSONAL_USE } from '../lib/config';
 
 // ---------------------------------------------------------------------------
 // StarRating — renders filled/empty stars for culture ratings
@@ -51,9 +55,9 @@ const StarRating = ({ value, size = 11 }: { value: number; size?: number }) => {
 };
 
 // ---------------------------------------------------------------------------
-// MockupNativelyInterface — fake in-meeting widget for the opacity preview
+// MockupSensiInterface — fake in-meeting widget for the opacity preview
 // ---------------------------------------------------------------------------
-const MockupNativelyInterface = ({ opacity }: { opacity: number }) => {
+const MockupSensiInterface = ({ opacity }: { opacity: number }) => {
     const resolvedTheme = useResolvedTheme();
     const appearance = useMemo(
         () => getOverlayAppearance(opacity, resolvedTheme),
@@ -71,12 +75,8 @@ const MockupNativelyInterface = ({ opacity }: { opacity: number }) => {
                     <div className="flex justify-center mb-2 select-none z-50">
                         <div className="flex items-center gap-2 rounded-full overlay-pill-surface backdrop-blur-md pl-1.5 pr-1.5 py-1.5" style={appearance.pillStyle}>
                             <div className="w-8 h-8 rounded-full flex items-center justify-center overflow-hidden overlay-icon-surface" style={appearance.iconStyle}>
-                                <img
-                                    src={icon}
-                                    alt="Natively"
-                                    className="w-[24px] h-[24px] object-contain opacity-95 scale-105 force-black-icon"
-                                    draggable="false"
-                                />
+                                {/* POLISH-01a: SVG mark replaces raster icon.png's upstream "N" glyph */}
+                                <SensiMark variant="mark" size={20} className="opacity-95" />
                             </div>
                             <div className="flex items-center gap-2 px-4 py-1.5 rounded-full text-[12px] font-medium border overlay-chip-surface overlay-text-interactive" style={appearance.chipStyle}>
                                 <ChevronUp className="w-3.5 h-3.5 opacity-70" />
@@ -373,10 +373,14 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
     // Sync active tab when modal opens
     useEffect(() => {
         if (isOpen && initialTab) {
-            setActiveTab(initialTab);
-            
+            // POLISH-02: in personal-use mode the 'profile' tab is hidden.
+            // If a caller passes initialTab='profile', redirect to 'general'
+            // so the user never lands on the dead-path Profile Intelligence UI.
+            const resolvedInitial = PERSONAL_USE && initialTab === 'profile' ? 'general' : initialTab;
+            setActiveTab(resolvedInitial);
+
             // Proactively load profile data if starting on profile tab
-            if (initialTab === 'profile') {
+            if (!PERSONAL_USE && initialTab === 'profile') {
                 window.electronAPI?.profileGetStatus?.().then(setProfileStatus).catch(() => { });
                 window.electronAPI?.profileGetProfile?.().then(data => {
                     setProfileData(data);
@@ -389,6 +393,35 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
     const { shortcuts, updateShortcut, resetShortcuts } = useShortcuts();
     const [isUndetectable, setIsUndetectable] = useState(false);
     const [isMousePassthrough, setIsMousePassthrough] = useState(false);
+    // PACKAGING-01 v2.4.3: rolling-response trigger mode toggle (M5-T8 UI).
+    // 'off'         = manual only (user clicks the button to get an answer)
+    // 'on-silence'  = auto-answer after interviewer pauses ~1.5 s
+    // UI exposes this as a 2-state "Auto answers" toggle; the 'on-demand'
+    // mode from the backend is hidden (equivalent to off from the UX side).
+    const [rollingMode, setRollingMode] = useState<'off' | 'on-silence' | 'on-demand'>('off');
+    // v2.14.8: how many ms of interviewer silence before auto-answer fires.
+    // Lower = responds sooner (may fire on partial questions); higher = waits
+    // for complete questions (adds latency). Range 1500–4000 ms, default 2500.
+    const [rollingSilenceMs, setRollingSilenceMs] = useState<number>(2500);
+    // v2.4.7: pre-meeting alert toggle. When true (default), sensi surfaces the
+    // launcher with a "Bring sensi?" modal 2 min before any calendar event.
+    const [preMeetingAlerts, setPreMeetingAlerts] = useState(true);
+    // v2.5.1: meeting auto-detect. When a Zoom/Teams/Meet app starts, sensi
+    // prompts whether to come along. Independent of calendar-based alerts.
+    const [meetingAutoDetect, setMeetingAutoDetect] = useState(true);
+    // M6-A v2.6.0: Live Coding mode — auto-attach latest screen to Code Hint /
+    // What-to-answer while a meeting is running. Off by default.
+    const [liveCodingMode, setLiveCodingMode] = useState(false);
+    // v2.6.1: Interview Mode mirror in main Settings → General. Same backing
+    // store as the overlay popup's Interview Mode toggle (actionButtonMode
+    // 'recap' <-> 'brainstorm'). When on, the third quick-action chip swaps
+    // Recap → Brainstorm + the overlay transcript labels the other speaker
+    // as "Interviewer" instead of "Speaker".
+    const [actionButtonMode, setActionButtonModeState] = useState<'recap' | 'brainstorm'>('recap');
+    // v2.6.2: Online Assessment mode. When on, "What to answer?" takes a fresh
+    // screenshot and returns the full solution to a coding problem (LeetCode,
+    // HackerRank, etc.) — no continuous streaming, no transcript needed.
+    const [onlineAssessmentMode, setOnlineAssessmentMode] = useState(false);
     const [disguiseMode, setDisguiseMode] = useState<'terminal' | 'settings' | 'activity' | 'none'>('none');
     const [openOnLogin, setOpenOnLogin] = useState(false);
     const [themeMode, setThemeMode] = useState<'system' | 'light' | 'dark'>('system');
@@ -448,8 +481,49 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
             window.electronAPI?.getOverlayMousePassthrough?.().then(setIsMousePassthrough).catch(() => { });
             window.electronAPI?.getDisguise?.().then(setDisguiseMode).catch(() => { });
             window.electronAPI?.getVerboseLogging?.().then(setVerboseLogging).catch(() => { });
+            window.electronAPI?.getRollingTriggerMode?.().then((mode) => {
+                if (mode === 'off' || mode === 'on-silence' || mode === 'on-demand') {
+                    setRollingMode(mode);
+                }
+            }).catch(() => { });
+            // v2.14.8: hydrate auto-answer silence threshold
+            window.electronAPI?.getRollingTriggerSilenceMs?.().then((ms) => {
+                if (typeof ms === 'number' && ms >= 500 && ms <= 10_000) {
+                    setRollingSilenceMs(ms);
+                }
+            }).catch(() => { });
+            window.electronAPI?.getPreMeetingAlertsEnabled?.().then(setPreMeetingAlerts).catch(() => { });
+            window.electronAPI?.getMeetingAutoDetectEnabled?.().then(setMeetingAutoDetect).catch(() => { });
+            window.electronAPI?.getLiveCodingModeEnabled?.().then(setLiveCodingMode).catch(() => { });
+            window.electronAPI?.getOnlineAssessmentModeEnabled?.().then(setOnlineAssessmentMode).catch(() => { });
+            // @ts-ignore — same API the overlay popup uses
+            window.electronAPI?.getActionButtonMode?.().then((m: 'recap' | 'brainstorm') => {
+                if (m === 'brainstorm' || m === 'recap') setActionButtonModeState(m);
+            }).catch(() => { });
         }
     }, [isOpen]);
+
+    // Listen for cross-window Interview Mode changes (overlay popup toggle + vice versa).
+    useEffect(() => {
+        // @ts-ignore
+        if (!window.electronAPI?.onActionButtonModeChanged) return;
+        // @ts-ignore
+        const unsub = window.electronAPI.onActionButtonModeChanged((m: 'recap' | 'brainstorm') => {
+            if (m === 'brainstorm' || m === 'recap') setActionButtonModeState(m);
+        });
+        return () => unsub();
+    }, []);
+
+    useEffect(() => {
+        if (window.electronAPI?.onRollingTriggerModeChanged) {
+            const unsubscribe = window.electronAPI.onRollingTriggerModeChanged((mode) => {
+                if (mode === 'off' || mode === 'on-silence' || mode === 'on-demand') {
+                    setRollingMode(mode);
+                }
+            });
+            return () => unsubscribe();
+        }
+    }, []);
 
     useEffect(() => {
         if (!showVerboseToast) return;
@@ -860,6 +934,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
     const [sttSaving, setSttSaving] = useState(false);
     const [sttSaved, setSttSaved] = useState(false);
     const [googleServiceAccountPath, setGoogleServiceAccountPath] = useState<string | null>(null);
+    const [showGoogleSaGuide, setShowGoogleSaGuide] = useState(false);
     const [hasNativelyKey, setHasNativelyKey] = useState(false);
     const [hasStoredSttGroqKey, setHasStoredSttGroqKey] = useState(false);
     const [hasStoredSttOpenaiKey, setHasStoredSttOpenaiKey] = useState(false);
@@ -1125,6 +1200,18 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
     const [calendarStatus, setCalendarStatus] = useState<{ connected: boolean; email?: string }>({ connected: false });
     const [isCalendarsLoading, setIsCalendarsLoading] = useState(false);
 
+    // sensi M8 / PASS B: listen for real-time calendar connection changes
+    // (e.g. after sign-in auto-connects Google Calendar) so the Calendar
+    // panel reflects reality without requiring the settings panel to reopen.
+    useEffect(() => {
+        const unsubscribe = window.electronAPI?.onCalendarConnectionChanged?.((status) => {
+            setCalendarStatus(status);
+        });
+        return () => {
+            if (typeof unsubscribe === 'function') unsubscribe();
+        };
+    }, []);
+
 
     // Load stored credentials on mount
 
@@ -1238,11 +1325,30 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
     }, [isOpen, selectedInput, selectedOutput]); // Re-run if isOpen changes, or if selected devices are cleared
 
     // Use the native mic test path so device IDs stay consistent with the meeting runtime.
+    // v2.5.2: the native mic applies VAD gating — no chunks emit during silence.
+    // Without decay the meter freezes at the last voice-activity peak and looks
+    // "broken." lastLevelRef tracks the last native update; a 50ms RAF-style
+    // interval pulls the displayed level toward zero when nothing new arrives.
     useEffect(() => {
         if (isOpen && activeTab === 'audio') {
+            let lastUpdateAt = 0;
+            let currentLevel = 0;
+            const DECAY_PER_TICK = 4; // percent per 50ms tick → ~1s to fall from 100 to 0
+            const IDLE_MS_BEFORE_DECAY = 150; // give brief pauses a grace period
+
             const unsubscribe = window.electronAPI?.onAudioTestLevel?.((level) => {
-                setMicLevel(Math.max(0, Math.min(100, level * 100)));
+                lastUpdateAt = Date.now();
+                currentLevel = Math.max(0, Math.min(100, level * 100));
+                setMicLevel(currentLevel);
             });
+
+            const decayTimer = setInterval(() => {
+                const idleFor = Date.now() - lastUpdateAt;
+                if (idleFor > IDLE_MS_BEFORE_DECAY && currentLevel > 0) {
+                    currentLevel = Math.max(0, currentLevel - DECAY_PER_TICK);
+                    setMicLevel(currentLevel);
+                }
+            }, 50);
 
             window.electronAPI?.startAudioTest(selectedInput || undefined).catch((error) => {
                 console.error("Error starting native microphone test:", error);
@@ -1250,6 +1356,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
             });
 
             return () => {
+                clearInterval(decayTimer);
                 unsubscribe?.();
                 window.electronAPI?.stopAudioTest?.().catch((error) => {
                     console.error("Error stopping native microphone test:", error);
@@ -1286,7 +1393,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                             damping: 32,
                             mass: 1
                         }}
-                        className="bg-bg-elevated w-full max-w-4xl h-[80vh] rounded-2xl border border-border-subtle shadow-2xl overflow-hidden relative"
+                        className="bg-bg-elevated w-full max-w-4xl h-[80vh] rounded-2xl border border-border-subtle shadow-2xl overflow-hidden relative pointer-events-auto"
                     >
                         <div 
                             id="settings-panel" 
@@ -1296,6 +1403,10 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                         {/* Sidebar */}
                         <div className="w-64 bg-bg-sidebar flex flex-col border-r border-border-subtle">
                             <div className="p-6">
+                                {/* POLISH-01: sensi wordmark lockup at the top of the sidebar for brand consistency with the Launcher header */}
+                                <div className="flex items-center gap-2 mb-4 text-text-primary opacity-80">
+                                    <SensiMark variant="lockup" size={20} />
+                                </div>
                                 <h2 className="font-semibold text-gray-400 text-xs uppercase tracking-wider mb-2">Settings</h2>
                                 <nav className="space-y-1">
                                     <button
@@ -1304,27 +1415,34 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                     >
                                         <Monitor size={16} /> General
                                     </button>
+                                    {/* sensi M8 / PASS B (v2.13.0): sensi-cloud Account tab */}
                                     <button
-                                        onClick={() => setActiveTab('natively-api')}
-                                        className={`w-full text-left px-3 py-2 rounded-lg text-sm font-medium transition-colors flex items-center gap-3 ${activeTab === 'natively-api' ? 'bg-bg-item-active text-text-primary' : 'text-text-secondary hover:text-text-primary hover:bg-bg-item-active/50'}`}
+                                        onClick={() => setActiveTab('account')}
+                                        className={`w-full text-left px-3 py-2 rounded-lg text-sm font-medium transition-colors flex items-center gap-3 ${activeTab === 'account' ? 'bg-bg-item-active text-text-primary' : 'text-text-secondary hover:text-text-primary hover:bg-bg-item-active/50'}`}
                                     >
-                                        <Zap size={16} className={activeTab === 'natively-api' ? 'text-blue-500' : 'text-blue-500/70'} />
-                                        <span>Natively API</span>
+                                        <UserCircle size={16} /> Account
                                     </button>
-                                    <button
-                                        onClick={() => {
-                                            setActiveTab('profile');
-                                            // Load profile status when switching to this tab
-                                            window.electronAPI?.profileGetStatus?.().then(setProfileStatus).catch(() => { });
-                                            window.electronAPI?.profileGetProfile?.().then(data => {
-                                                setProfileData(data);
-                                                if (data?.negotiationScript) setNegotiationScript(data.negotiationScript);
-                                            }).catch(() => { });
-                                        }}
-                                        className={`w-full text-left px-3 py-2 rounded-lg text-sm font-medium transition-colors flex items-center gap-3 ${activeTab === 'profile' ? 'bg-bg-item-active text-text-primary' : 'text-text-secondary hover:text-text-primary hover:bg-bg-item-active/50'}`}
-                                    >
-                                        <User size={16} /> Profile Intelligence
-                                    </button>
+                                    {/* POLISH-02: Profile Intelligence is a legacy upstream premium feature backed
+                                        by `premium/electron/knowledge/*` which does not exist in this fork. In
+                                        personal-use mode the tab is hidden so the "Knowledge engine not
+                                        initialized" red banner never reaches the user. The M4 sensi Knowledge
+                                        subsystem (Settings → Knowledge) is a separate, working feature. */}
+                                    {!PERSONAL_USE && (
+                                        <button
+                                            onClick={() => {
+                                                setActiveTab('profile');
+                                                // Load profile status when switching to this tab
+                                                window.electronAPI?.profileGetStatus?.().then(setProfileStatus).catch(() => { });
+                                                window.electronAPI?.profileGetProfile?.().then(data => {
+                                                    setProfileData(data);
+                                                    if (data?.negotiationScript) setNegotiationScript(data.negotiationScript);
+                                                }).catch(() => { });
+                                            }}
+                                            className={`w-full text-left px-3 py-2 rounded-lg text-sm font-medium transition-colors flex items-center gap-3 ${activeTab === 'profile' ? 'bg-bg-item-active text-text-primary' : 'text-text-secondary hover:text-text-primary hover:bg-bg-item-active/50'}`}
+                                        >
+                                            <User size={16} /> Profile Intelligence
+                                        </button>
+                                    )}
                                     <button
                                         onClick={() => setActiveTab('ai-providers')}
                                         className={`w-full text-left px-3 py-2 rounded-lg text-sm font-medium transition-colors flex items-center gap-3 ${activeTab === 'ai-providers' ? 'bg-bg-item-active text-text-primary' : 'text-text-secondary hover:text-text-primary hover:bg-bg-item-active/50'}`}
@@ -1332,10 +1450,23 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                         <FlaskConical size={16} /> AI Providers
                                     </button>
                                     <button
+                                        onClick={() => setActiveTab('knowledge')}
+                                        className={`w-full text-left px-3 py-2 rounded-lg text-sm font-medium transition-colors flex items-center gap-3 ${activeTab === 'knowledge' ? 'bg-bg-item-active text-text-primary' : 'text-text-secondary hover:text-text-primary hover:bg-bg-item-active/50'}`}
+                                    >
+                                        <BookOpen size={16} /> Knowledge
+                                    </button>
+                                    <button
                                         onClick={() => setActiveTab('calendar')}
                                         className={`w-full text-left px-3 py-2 rounded-lg text-sm font-medium transition-colors flex items-center gap-3 ${activeTab === 'calendar' ? 'bg-bg-item-active text-text-primary' : 'text-text-secondary hover:text-text-primary hover:bg-bg-item-active/50'}`}
                                     >
                                         <Calendar size={16} /> Calendar
+                                    </button>
+                                    {/* sensi M7 / PERSONA-01: Persona tab (lightweight resume). */}
+                                    <button
+                                        onClick={() => setActiveTab('persona')}
+                                        className={`w-full text-left px-3 py-2 rounded-lg text-sm font-medium transition-colors flex items-center gap-3 ${activeTab === 'persona' ? 'bg-bg-item-active text-text-primary' : 'text-text-secondary hover:text-text-primary hover:bg-bg-item-active/50'}`}
+                                    >
+                                        <User size={16} /> Persona
                                     </button>
                                     <button
                                         onClick={() => setActiveTab('audio')}
@@ -1371,7 +1502,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                     onClick={() => window.electronAPI.quitApp()}
                                     className="w-full text-left px-3 py-2 rounded-lg text-sm font-medium text-red-400 hover:bg-red-500/10 transition-colors flex items-center gap-3"
                                 >
-                                    <LogOut size={16} /> Quit Natively
+                                    <LogOut size={16} /> Quit sensi
                                 </button>
                                 <button onClick={onClose} className="group mt-2 w-full text-left px-3 py-2 rounded-lg text-sm font-medium text-text-secondary hover:text-text-primary hover:bg-bg-item-active/50 transition-colors flex items-center gap-3">
                                     <X size={18} className="group-hover:text-red-500 transition-colors" /> Close
@@ -1410,20 +1541,42 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                                     <h3 className="text-lg font-bold text-text-primary">{isUndetectable ? 'Undetectable' : 'Detectable'}</h3>
                                                 </div>
                                                 <p className="text-xs text-text-secondary">
-                                                    Natively is currently {isUndetectable ? 'undetectable' : 'detectable'} by screen-sharing. <button className="text-blue-400 hover:underline">Supported apps here</button>
+                                                    sensi is currently {isUndetectable ? 'undetectable' : 'detectable'} by screen-sharing. <button className="text-blue-400 hover:underline">Supported apps here</button>
                                                 </p>
+                                                {/* v2.16.2: self-test diagnostic. Captures the
+                                                    user's own screen and drops the PNG on the
+                                                    Desktop, then opens Explorer there. Lets the
+                                                    user visually confirm whether sensi is hidden
+                                                    in a real screen grab. */}
+                                                {isUndetectable && (
+                                                    <button
+                                                        onClick={async () => {
+                                                            try {
+                                                                // @ts-ignore — typed via preload update below
+                                                                const r = await window.electronAPI?.stealthSelfCapture?.();
+                                                                if (!r?.success) {
+                                                                    alert(`Stealth self-test failed: ${r?.error ?? 'unknown'}`);
+                                                                }
+                                                            } catch (e) {
+                                                                alert(`Stealth self-test threw: ${(e as Error)?.message ?? e}`);
+                                                            }
+                                                        }}
+                                                        className="text-[10.5px] font-medium text-text-tertiary hover:text-text-primary mt-2 underline underline-offset-2"
+                                                        title="Capture your screen and open the PNG. If sensi appears in the image, stealth is not applying on this machine."
+                                                    >
+                                                        Test stealth (capture + open on Desktop)
+                                                    </button>
+                                                )}
                                             </div>
                                             <div
                                                 onClick={() => {
                                                     const newState = !isUndetectable;
                                                     setIsUndetectable(newState);
                                                     window.electronAPI?.setUndetectable(newState);
-                                                    // Analytics: Undetectable Mode Toggle
-                                                    analytics.trackModeSelected(newState ? 'undetectable' : 'overlay');
                                                 }}
                                                 className={`w-11 h-6 rounded-full relative transition-colors ${isUndetectable ? 'bg-accent-primary' : 'bg-bg-toggle-switch border border-border-muted'}`}
                                             >
-                                                <div className={`absolute top-1 left-1 w-4 h-4 rounded-full bg-white transition-transform ${isUndetectable ? 'translate-x-5' : 'translate-x-0'}`} />
+                                                <div className={`absolute top-1 left-1 w-4 h-4 rounded-full bg-[#F1EDE6] shadow-[0_1px_2px_rgba(0,0,0,0.25)] transition-transform ${isUndetectable ? 'translate-x-5' : 'translate-x-0'}`} />
                                             </div>
                                         </div>
 
@@ -1446,13 +1599,203 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                                 }}
                                                 className={`w-11 h-6 rounded-full relative transition-colors cursor-pointer ${isMousePassthrough ? 'bg-sky-500' : 'bg-bg-toggle-switch border border-border-muted'}`}
                                             >
-                                                <div className={`absolute top-1 left-1 w-4 h-4 rounded-full bg-white transition-transform ${isMousePassthrough ? 'translate-x-5' : 'translate-x-0'}`} />
+                                                <div className={`absolute top-1 left-1 w-4 h-4 rounded-full bg-[#F1EDE6] shadow-[0_1px_2px_rgba(0,0,0,0.25)] transition-transform ${isMousePassthrough ? 'translate-x-5' : 'translate-x-0'}`} />
+                                            </div>
+                                        </div>
+
+                                        {/* M5-T8 — Auto-answer toggle. Off = manual (user clicks), On = auto-fire when interviewer pauses ~1.5s. */}
+                                        <div className={`${isLight ? 'bg-bg-card' : 'bg-bg-item-surface'} rounded-xl p-5 border border-border-subtle flex items-center justify-between transition-all ${rollingMode === 'on-silence' ? 'shadow-lg shadow-emerald-500/10' : ''}`}>
+                                            <div className="flex flex-col gap-1">
+                                                <div className="flex items-center gap-2">
+                                                    <Zap size={18} className={rollingMode === 'on-silence' ? 'text-emerald-400' : 'text-text-primary'} />
+                                                    <h3 className="text-lg font-bold text-text-primary">Auto-answer</h3>
+                                                </div>
+                                                <p className="text-xs text-text-secondary">
+                                                    {rollingMode === 'on-silence'
+                                                        ? 'Auto: sensi answers after the interviewer pauses. Disable if you want to click for answers.'
+                                                        : 'Manual: click the answer button to get a response. Enable to have sensi auto-answer after the interviewer pauses.'}
+                                                </p>
+                                            </div>
+                                            <div
+                                                onClick={() => {
+                                                    const newMode: 'off' | 'on-silence' = rollingMode === 'on-silence' ? 'off' : 'on-silence';
+                                                    setRollingMode(newMode);
+                                                    window.electronAPI?.setRollingTriggerMode?.(newMode).catch(() => { });
+                                                }}
+                                                className={`w-11 h-6 rounded-full relative transition-colors cursor-pointer ${rollingMode === 'on-silence' ? 'bg-emerald-500' : 'bg-bg-toggle-switch border border-border-muted'}`}
+                                            >
+                                                <div className={`absolute top-1 left-1 w-4 h-4 rounded-full bg-[#F1EDE6] shadow-[0_1px_2px_rgba(0,0,0,0.25)] transition-transform ${rollingMode === 'on-silence' ? 'translate-x-5' : 'translate-x-0'}`} />
+                                            </div>
+                                        </div>
+
+                                        {/* v2.14.8: Auto-answer sensitivity slider.
+                                            Shown only when auto-answer is on. Lower = responds sooner
+                                            (can fire on partial questions), higher = waits for the
+                                            interviewer to finish the full question. */}
+                                        {rollingMode === 'on-silence' && (
+                                            <div className={`${isLight ? 'bg-bg-card' : 'bg-bg-item-surface'} rounded-xl p-5 border border-border-subtle`}>
+                                                <div className="flex items-center justify-between mb-1">
+                                                    <h3 className="text-sm font-semibold text-text-primary">Auto-answer sensitivity</h3>
+                                                    <span className="text-xs text-text-secondary tabular-nums">{(rollingSilenceMs / 1000).toFixed(1)}s</span>
+                                                </div>
+                                                <p className="text-xs text-text-secondary mb-3">
+                                                    How long of a pause before sensi decides the speaker has finished. On Deepgram, this also tunes the voice-activity endpoint. Answers start as soon as the pause is reached; if the speaker resumes mid-answer, the stream is cancelled and restarts on the next pause.
+                                                </p>
+                                                <input
+                                                    type="range"
+                                                    min={1500}
+                                                    max={4000}
+                                                    step={100}
+                                                    value={rollingSilenceMs}
+                                                    onChange={(e) => {
+                                                        const ms = Number(e.target.value);
+                                                        setRollingSilenceMs(ms);
+                                                        window.electronAPI?.setRollingTriggerSilenceMs?.(ms).catch(() => { });
+                                                    }}
+                                                    className="w-full accent-emerald-500"
+                                                />
+                                                <div className="flex justify-between text-[10px] text-text-tertiary mt-1">
+                                                    <span>Faster (1.5s)</span>
+                                                    <span>Balanced (2.5s)</span>
+                                                    <span>Patient (4s)</span>
+                                                </div>
+                                            </div>
+                                        )}
+
+                                        {/* Pre-meeting alert toggle. When on, sensi pops up 2 min before each calendar event asking "Bring sensi?". */}
+                                        <div className={`${isLight ? 'bg-bg-card' : 'bg-bg-item-surface'} rounded-xl p-5 border border-border-subtle flex items-center justify-between transition-all ${preMeetingAlerts ? 'shadow-lg shadow-[var(--accent-primary)]/10' : ''}`}>
+                                            <div className="flex flex-col gap-1">
+                                                <div className="flex items-center gap-2">
+                                                    <Calendar size={18} className={preMeetingAlerts ? 'text-[var(--accent-primary)]' : 'text-text-primary'} />
+                                                    <h3 className="text-lg font-bold text-text-primary">Pre-meeting alert (calendar)</h3>
+                                                </div>
+                                                <p className="text-xs text-text-secondary">
+                                                    {preMeetingAlerts
+                                                        ? 'Sensi pops up 2 minutes before each Google Calendar event asking whether to come along.'
+                                                        : 'Off: no calendar-based pop-up. Native system notifications still fire unless disabled at the OS level.'}
+                                                </p>
+                                            </div>
+                                            <div
+                                                onClick={() => {
+                                                    const newState = !preMeetingAlerts;
+                                                    setPreMeetingAlerts(newState);
+                                                    window.electronAPI?.setPreMeetingAlertsEnabled?.(newState).catch(() => { });
+                                                }}
+                                                className={`w-11 h-6 rounded-full relative transition-colors cursor-pointer ${preMeetingAlerts ? 'bg-[var(--accent-primary)]' : 'bg-bg-toggle-switch border border-border-muted'}`}
+                                            >
+                                                <div className={`absolute top-1 left-1 w-4 h-4 rounded-full bg-[#F1EDE6] shadow-[0_1px_2px_rgba(0,0,0,0.25)] transition-transform ${preMeetingAlerts ? 'translate-x-5' : 'translate-x-0'}`} />
+                                            </div>
+                                        </div>
+
+                                        {/* v2.6.1: Interview Mode mirror. Toggling here syncs the overlay popup. */}
+                                        <div className={`${isLight ? 'bg-bg-card' : 'bg-bg-item-surface'} rounded-xl p-5 border border-border-subtle flex items-center justify-between transition-all ${actionButtonMode === 'brainstorm' ? 'shadow-lg shadow-violet-500/10' : ''}`}>
+                                            <div className="flex flex-col gap-1">
+                                                <div className="flex items-center gap-2">
+                                                    <Sparkles size={18} className={actionButtonMode === 'brainstorm' ? 'text-violet-400' : 'text-text-primary'} />
+                                                    <h3 className="text-lg font-bold text-text-primary">Interview Mode</h3>
+                                                </div>
+                                                <p className="text-xs text-text-secondary">
+                                                    {actionButtonMode === 'brainstorm'
+                                                        ? 'Third overlay action is Brainstorm (system-design thinking). Transcript labels the other speaker as "Interviewer".'
+                                                        : 'Third overlay action is Recap (summary). Transcript labels the other speaker as "Speaker" (generic).'}
+                                                </p>
+                                            </div>
+                                            <div
+                                                onClick={async () => {
+                                                    const newMode: 'recap' | 'brainstorm' = actionButtonMode === 'brainstorm' ? 'recap' : 'brainstorm';
+                                                    setActionButtonModeState(newMode);
+                                                    try {
+                                                        // @ts-ignore
+                                                        await window.electronAPI?.setActionButtonMode?.(newMode);
+                                                    } catch { /* swallow */ }
+                                                }}
+                                                className={`w-11 h-6 rounded-full relative transition-colors cursor-pointer ${actionButtonMode === 'brainstorm' ? 'bg-violet-500' : 'bg-bg-toggle-switch border border-border-muted'}`}
+                                            >
+                                                <div className={`absolute top-1 left-1 w-4 h-4 rounded-full bg-[#F1EDE6] shadow-[0_1px_2px_rgba(0,0,0,0.25)] transition-transform ${actionButtonMode === 'brainstorm' ? 'translate-x-5' : 'translate-x-0'}`} />
+                                            </div>
+                                        </div>
+
+                                        {/* M6-A v2.6.0: Live Coding mode. Auto-attaches latest screen frame to Code Hint / What-to-answer. */}
+                                        <div className={`${isLight ? 'bg-bg-card' : 'bg-bg-item-surface'} rounded-xl p-5 border border-border-subtle flex items-center justify-between transition-all ${liveCodingMode ? 'shadow-lg shadow-[var(--accent-primary)]/10' : ''}`}>
+                                            <div className="flex flex-col gap-1">
+                                                <div className="flex items-center gap-2">
+                                                    <Eye size={18} className={liveCodingMode ? 'text-[var(--accent-primary)]' : 'text-text-primary'} />
+                                                    <h3 className="text-lg font-bold text-text-primary">Live Coding mode</h3>
+                                                </div>
+                                                <p className="text-xs text-text-secondary">
+                                                    {liveCodingMode
+                                                        ? 'Sensi glances at your screen every ~12s during a meeting and auto-attaches the latest frame to your next Code Hint or What-to-answer. Saves you a Ctrl+H.'
+                                                        : 'Off: you must Ctrl+H manually before Code Hint / What-to-answer to include your screen. Enable for live technical interviews.'}
+                                                </p>
+                                            </div>
+                                            <div
+                                                onClick={() => {
+                                                    const newState = !liveCodingMode;
+                                                    setLiveCodingMode(newState);
+                                                    window.electronAPI?.setLiveCodingModeEnabled?.(newState).catch(() => { });
+                                                }}
+                                                className={`w-11 h-6 rounded-full relative transition-colors cursor-pointer ${liveCodingMode ? 'bg-[var(--accent-primary)]' : 'bg-bg-toggle-switch border border-border-muted'}`}
+                                            >
+                                                <div className={`absolute top-1 left-1 w-4 h-4 rounded-full bg-[#F1EDE6] shadow-[0_1px_2px_rgba(0,0,0,0.25)] transition-transform ${liveCodingMode ? 'translate-x-5' : 'translate-x-0'}`} />
+                                            </div>
+                                        </div>
+
+                                        {/* v2.6.2: Online Assessment mode. Turns "What to answer?" into a full-solution
+                                            generator for any solo online assessment — coding problems, MCQs, T/F,
+                                            essays, short answers, math, fill-in-the-blank, matching, diagrams, or
+                                            knowledge quizzes. v2.7.2 broadened beyond coding-only. */}
+                                        <div className={`${isLight ? 'bg-bg-card' : 'bg-bg-item-surface'} rounded-xl p-5 border border-border-subtle flex items-center justify-between transition-all ${onlineAssessmentMode ? 'shadow-lg shadow-[var(--accent-primary)]/10' : ''}`}>
+                                            <div className="flex flex-col gap-1">
+                                                <div className="flex items-center gap-2">
+                                                    <Sparkles size={18} className={onlineAssessmentMode ? 'text-[var(--accent-primary)]' : 'text-text-primary'} />
+                                                    <h3 className="text-lg font-bold text-text-primary">Online Assessment mode</h3>
+                                                </div>
+                                                <p className="text-xs text-text-secondary">
+                                                    {onlineAssessmentMode
+                                                        ? 'Tap "What to answer?" and sensi grabs a fresh screenshot, detects the question type (coding, MCQ, true/false, essay, fill-in, math, matching, diagram, knowledge quiz), and returns the complete answer in the right format. No continuous streaming.'
+                                                        : 'Off: "What to answer?" stays in interview mode (transcript-driven). Enable for any solo online assessment — LeetCode, HackerRank, quizzes, certifications, take-homes, proctored tests.'}
+                                                </p>
+                                            </div>
+                                            <div
+                                                onClick={() => {
+                                                    const newState = !onlineAssessmentMode;
+                                                    setOnlineAssessmentMode(newState);
+                                                    window.electronAPI?.setOnlineAssessmentModeEnabled?.(newState).catch(() => { });
+                                                }}
+                                                className={`w-11 h-6 rounded-full relative transition-colors cursor-pointer focus:outline-none ${onlineAssessmentMode ? 'bg-[var(--accent-primary)]' : 'bg-bg-toggle-switch border border-border-muted'}`}
+                                            >
+                                                <div className={`absolute top-1 left-1 w-4 h-4 rounded-full bg-[#F1EDE6] shadow-sm transition-transform ${onlineAssessmentMode ? 'translate-x-5' : 'translate-x-0'}`} />
+                                            </div>
+                                        </div>
+
+                                        {/* Meeting auto-detect (v2.5.1). Prompts when sensi detects a Zoom/Teams/Meet app is running. */}
+                                        <div className={`${isLight ? 'bg-bg-card' : 'bg-bg-item-surface'} rounded-xl p-5 border border-border-subtle flex items-center justify-between transition-all ${meetingAutoDetect ? 'shadow-lg shadow-[var(--accent-primary)]/10' : ''}`}>
+                                            <div className="flex flex-col gap-1">
+                                                <div className="flex items-center gap-2">
+                                                    <Activity size={18} className={meetingAutoDetect ? 'text-[var(--accent-primary)]' : 'text-text-primary'} />
+                                                    <h3 className="text-lg font-bold text-text-primary">Auto-detect meetings</h3>
+                                                </div>
+                                                <p className="text-xs text-text-secondary">
+                                                    {meetingAutoDetect
+                                                        ? 'Sensi prompts when it detects a call has started in Zoom, Teams, Meet, Slack, Discord, Webex, or GoToMeeting.'
+                                                        : 'Off: sensi won\'t detect running meeting apps. You\'ll need to start sensi manually from the launcher.'}
+                                                </p>
+                                            </div>
+                                            <div
+                                                onClick={() => {
+                                                    const newState = !meetingAutoDetect;
+                                                    setMeetingAutoDetect(newState);
+                                                    window.electronAPI?.setMeetingAutoDetectEnabled?.(newState).catch(() => { });
+                                                }}
+                                                className={`w-11 h-6 rounded-full relative transition-colors cursor-pointer ${meetingAutoDetect ? 'bg-[var(--accent-primary)]' : 'bg-bg-toggle-switch border border-border-muted'}`}
+                                            >
+                                                <div className={`absolute top-1 left-1 w-4 h-4 rounded-full bg-[#F1EDE6] shadow-[0_1px_2px_rgba(0,0,0,0.25)] transition-transform ${meetingAutoDetect ? 'translate-x-5' : 'translate-x-0'}`} />
                                             </div>
                                         </div>
 
                                         <div>
                                             <h3 className="text-lg font-bold text-text-primary mb-1">General settings</h3>
-                                            <p className="text-xs text-text-secondary mb-2">Customize how Natively works for you</p>
+                                            <p className="text-xs text-text-secondary mb-2">Customize how sensi works for you</p>
 
                                             <div className={`rounded-xl border ${isLight ? 'bg-bg-card border-border-subtle divide-y divide-border-subtle' : 'bg-transparent border-transparent divide-y divide-border-subtle/20'}`}>
                                             <div className="space-y-0">
@@ -1463,8 +1806,8 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                                             <Power size={20} />
                                                         </div>
                                                         <div>
-                                                            <h3 className="text-sm font-bold text-text-primary">Open Natively when you log in</h3>
-                                                            <p className="text-xs text-text-secondary mt-0.5">Natively will open automatically when you log in to your computer</p>
+                                                            <h3 className="text-sm font-bold text-text-primary">Open sensi when you log in</h3>
+                                                            <p className="text-xs text-text-secondary mt-0.5">sensi will open automatically when you log in to your computer</p>
                                                         </div>
                                                     </div>
                                                     <div
@@ -1475,7 +1818,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                                         }}
                                                         className={`w-11 h-6 rounded-full relative transition-colors ${openOnLogin ? 'bg-accent-primary' : 'bg-bg-toggle-switch border border-border-muted'}`}
                                                     >
-                                                        <div className={`absolute top-1 left-1 w-4 h-4 rounded-full bg-white transition-transform ${openOnLogin ? 'translate-x-5' : 'translate-x-0'}`} />
+                                                        <div className={`absolute top-1 left-1 w-4 h-4 rounded-full bg-[#F1EDE6] shadow-[0_1px_2px_rgba(0,0,0,0.25)] transition-transform ${openOnLogin ? 'translate-x-5' : 'translate-x-0'}`} />
                                                     </div>
                                                 </div>
 
@@ -1501,7 +1844,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                                         }}
                                                         className={`w-11 h-6 rounded-full relative transition-colors cursor-pointer ${verboseLogging ? 'bg-amber-500' : 'bg-bg-toggle-switch border border-border-muted'}`}
                                                     >
-                                                        <div className={`absolute top-1 left-1 w-4 h-4 rounded-full bg-white transition-transform ${verboseLogging ? 'translate-x-5' : 'translate-x-0'}`} />
+                                                        <div className={`absolute top-1 left-1 w-4 h-4 rounded-full bg-[#F1EDE6] shadow-[0_1px_2px_rgba(0,0,0,0.25)] transition-transform ${verboseLogging ? 'translate-x-5' : 'translate-x-0'}`} />
                                                     </div>
                                                 </div>
 
@@ -1520,7 +1863,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                                                 <div className="flex items-center gap-2.5 min-w-0">
                                                                     <Terminal size={14} className="text-amber-400 shrink-0" />
                                                                     <p className="text-xs text-amber-200/80 leading-snug truncate">
-                                                                        Logs → <span className="font-mono text-amber-300">~/Documents/natively_debug.log</span>
+                                                                        Logs → <span className="font-mono text-amber-300">~/Documents/sensi_debug.log</span>
                                                                     </p>
                                                                 </div>
                                                                 <button
@@ -1561,7 +1904,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                                         }}
                                                         className={`w-11 h-6 rounded-full relative transition-colors ${showTranscript ? 'bg-accent-primary' : 'bg-bg-toggle-switch border border-border-muted'}`}
                                                     >
-                                                        <div className={`absolute top-1 left-1 w-4 h-4 rounded-full bg-white transition-transform ${showTranscript ? 'translate-x-5' : 'translate-x-0'}`} />
+                                                        <div className={`absolute top-1 left-1 w-4 h-4 rounded-full bg-[#F1EDE6] shadow-[0_1px_2px_rgba(0,0,0,0.25)] transition-transform ${showTranscript ? 'translate-x-5' : 'translate-x-0'}`} />
                                                     </div>
                                                 </div>
 
@@ -1574,7 +1917,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                                         </div>
                                                         <div>
                                                             <h3 className="text-sm font-bold text-text-primary">Theme</h3>
-                                                            <p className="text-xs text-text-secondary mt-0.5">Customize how Natively looks on your device</p>
+                                                            <p className="text-xs text-text-secondary mt-0.5">Customize how sensi looks on your device</p>
                                                         </div>
                                                     </div>
 
@@ -1680,7 +2023,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                                         <div>
                                                             <h3 className="text-sm font-bold text-text-primary">Version</h3>
                                                             <p className="text-xs text-text-secondary mt-0.5">
-                                                                You are currently using Natively version {packageJson.version}
+                                                                You are currently using sensi version {packageJson.version}
                                                             </p>
                                                         </div>
                                                     </div>
@@ -1793,7 +2136,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                                 <h3 className="text-lg font-bold text-text-primary">Process Disguise</h3>
                                             </div>
                                             <p className="text-xs text-text-secondary">
-                                                Disguise Natively as another application to prevent detection during screen sharing.
+                                                Disguise sensi as another application to prevent detection during screen sharing.
                                                 <span className="block mt-1 text-text-tertiary">
                                                     Select a disguise to be automatically applied when Undetectable mode is on.
                                                 </span>
@@ -1821,8 +2164,6 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                                         setDisguiseMode(option.id);
                                                         // @ts-ignore
                                                         window.electronAPI?.setDisguise(option.id);
-                                                        // Analytics
-                                                        analytics.trackModeSelected(`disguise_${option.id}`);
                                                     }}
                                                     className={`p-3 rounded-lg border text-left flex items-center gap-3 transition-all ${disguiseMode === option.id
                                                         ? 'bg-accent-primary border-accent-primary text-white shadow-lg shadow-blue-500/20'
@@ -1841,7 +2182,12 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
 
                                 </div>
                             )}
-                            {activeTab === 'profile' && (
+                            {/* POLISH-02: Profile Intelligence panel gated behind !PERSONAL_USE.
+                                The dead-path legacy premium feature cannot be reached via the sidebar
+                                in personal-use mode (redirected to 'general'), but we keep the
+                                `!PERSONAL_USE` guard here as defense-in-depth in case any other code
+                                path ever sets activeTab='profile'. */}
+                            {!PERSONAL_USE && activeTab === 'profile' && (
                                 <div className="space-y-6 animated fadeIn">
                                     {/* Introduction */}
                                     <div className="mb-5">
@@ -2285,7 +2631,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                                         <span className="shrink-0 mt-[1px]">⚠</span>
                                                         <span>
                                                             Web search credits exhausted for this month — showing AI-only research instead.
-                                                            Resets next billing cycle or <span className="underline cursor-pointer" onClick={() => (window.electronAPI as any)?.openExternal?.('https://checkout.dodopayments.com/buy/pdt_0NbFixGmD8CSeawb5qvVl')}>upgrade your plan</span>.
+                                                            Resets next billing cycle.
                                                         </span>
                                                     </div>
                                                 )}
@@ -2712,15 +3058,18 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                             {activeTab === 'ai-providers' && (
                                 <AIProvidersSettings />
                             )}
-                            {activeTab === 'natively-api' && (
-                                <NativelyApiSettings />
+                            {activeTab === 'knowledge' && (
+                                <KnowledgeSettings />
+                            )}
+                            {activeTab === 'persona' && (
+                                <PersonaSettings />
                             )}
                             {activeTab === 'keybinds' && (
                                 <div className="space-y-5 animated fadeIn select-text pb-4">
                                     <div className="flex items-start justify-between">
                                         <div>
                                             <h3 className="text-lg font-bold text-text-primary mb-1">Keyboard shortcuts</h3>
-                                            <p className="text-xs text-text-secondary">Natively works with these easy to remember commands.</p>
+                                            <p className="text-xs text-text-secondary">sensi works with these easy to remember commands.</p>
                                         </div>
                                         <button
                                             onClick={resetShortcuts}
@@ -2882,15 +3231,16 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                                         value={sttProvider}
                                                         onChange={(val) => handleSttProviderChange(val as any)}
                                                         options={[
-                                                            ...(hasNativelyKey ? [{ id: 'natively', label: 'Natively API', badge: 'Saved' as const, recommended: true, desc: 'Managed transcription via Natively backend', color: 'blue', icon: <Mic size={14} /> }] : []),
-                                                            { id: 'google', label: 'Google Cloud', badge: googleServiceAccountPath ? 'Saved' : null, recommended: true, desc: 'gRPC streaming via Service Account', color: 'blue', icon: <Mic size={14} /> },
-                                                            { id: 'groq', label: 'Groq Whisper', badge: hasStoredSttGroqKey ? 'Saved' : null, recommended: true, desc: 'Ultra-fast REST transcription', color: 'orange', icon: <Mic size={14} /> },
+                                                            // sensi M2-T2: Natively-managed STT provider entry removed (defunct)
+                                                            { id: 'google', label: 'Google Cloud', badge: googleServiceAccountPath ? 'Saved' : null, desc: 'gRPC streaming via Service Account', color: 'blue', icon: <Mic size={14} /> },
+                                                            { id: 'groq', label: 'Groq Whisper', badge: hasStoredSttGroqKey ? 'Saved' : null, desc: 'Ultra-fast REST transcription', color: 'orange', icon: <Mic size={14} /> },
                                                             { id: 'openai', label: 'OpenAI Whisper', badge: hasStoredSttOpenaiKey ? 'Saved' : null, desc: 'OpenAI-compatible Whisper API', color: 'green', icon: <Mic size={14} /> },
+                                                            /* sensi M2-T1: Deepgram is the one recommended STT — simpler auth, low latency, generous free tier. See TASKS.md M2-T1. */
                                                             { id: 'deepgram', label: 'Deepgram Nova-3', badge: hasStoredDeepgramKey ? 'Saved' : null, recommended: true, desc: 'High-accuracy REST transcription', color: 'purple', icon: <Mic size={14} /> },
                                                             { id: 'elevenlabs', label: 'ElevenLabs Scribe', badge: hasStoredElevenLabsKey ? 'Saved' : null, desc: 'Scribe v2 Realtime API', color: 'teal', icon: <Mic size={14} /> },
                                                             { id: 'azure', label: 'Azure Speech', badge: hasStoredAzureKey ? 'Saved' : null, desc: 'Microsoft Cognitive Services STT', color: 'cyan', icon: <Mic size={14} /> },
                                                             { id: 'ibmwatson', label: 'IBM Watson', badge: hasStoredIbmWatsonKey ? 'Saved' : null, desc: 'IBM Watson cloud STT service', color: 'indigo', icon: <Mic size={14} /> },
-                                                            { id: 'soniox', label: 'Soniox', badge: hasStoredSonioxKey ? 'Saved' : null, recommended: true, desc: '60+ languages, multilingual, domain context', color: 'cyan', icon: <Mic size={14} /> },
+                                                            { id: 'soniox', label: 'Soniox', badge: hasStoredSonioxKey ? 'Saved' : null, desc: '60+ languages, multilingual, domain context', color: 'cyan', icon: <Mic size={14} /> },
                                                         ]}
                                                     />
                                                 </div>
@@ -2933,11 +3283,62 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                             {/* Google Cloud Service Account */}
                                             {sttProvider === 'google' && (
                                                 <div className="bg-bg-card rounded-xl border border-border-subtle p-4">
-                                                    <label className="text-xs font-medium text-text-secondary mb-2 block">Service Account JSON</label>
+                                                    <div className="flex items-start justify-between mb-3">
+                                                        <div>
+                                                            <label className="text-xs font-medium text-text-secondary block mb-1">Service Account JSON</label>
+                                                            <p className="text-[10.5px] text-text-tertiary max-w-[420px] leading-relaxed">
+                                                                Required for Google Cloud Speech-to-Text. Supports 125+ languages including Yoruba, Hausa, Igbo, Swahili, Zulu and Amharic.
+                                                            </p>
+                                                        </div>
+                                                        <button
+                                                            onClick={() => setShowGoogleSaGuide(!showGoogleSaGuide)}
+                                                            className="text-[11px] text-[var(--accent-primary)] hover:underline flex items-center gap-1 flex-shrink-0"
+                                                        >
+                                                            {showGoogleSaGuide ? 'Hide steps' : 'Setup guide'}
+                                                            <ExternalLink size={10} />
+                                                        </button>
+                                                    </div>
+
+                                                    {showGoogleSaGuide && (
+                                                        <div className="mt-1 mb-3 p-3.5 rounded-lg bg-bg-input border border-border-subtle text-[12px] text-text-secondary leading-relaxed">
+                                                            <ol className="list-decimal ml-4 space-y-1.5">
+                                                                <li>
+                                                                    Open{' '}
+                                                                    <button
+                                                                        onClick={() => window.electronAPI?.openExternal?.('https://console.cloud.google.com/')}
+                                                                        className="text-[var(--accent-primary)] hover:underline"
+                                                                    >Google Cloud Console</button>{' '}
+                                                                    → create a new project (or select an existing one).
+                                                                </li>
+                                                                <li>
+                                                                    <strong>APIs & Services → Library</strong> → search <span className="font-mono text-[11px] bg-bg-elevated px-1 rounded">Cloud Speech-to-Text API</span> → <strong>Enable</strong>.
+                                                                </li>
+                                                                <li>
+                                                                    <strong>IAM & Admin → Service Accounts</strong> → <strong>Create Service Account</strong>. Name it <span className="font-mono text-[11px] bg-bg-elevated px-1 rounded">sensi-stt</span>. Skip optional steps.
+                                                                </li>
+                                                                <li>
+                                                                    Grant the role <strong>Cloud Speech Client</strong> (or <em>Cloud Speech-to-Text User</em>) so it can only call the Speech API.
+                                                                </li>
+                                                                <li>
+                                                                    Open the new service account → <strong>Keys</strong> tab → <strong>Add key → Create new key → JSON</strong>. A <span className="font-mono text-[11px] bg-bg-elevated px-1 rounded">*.json</span> file downloads.
+                                                                </li>
+                                                                <li>
+                                                                    Click <strong>Select File</strong> below and pick the downloaded JSON. sensi stores the file path only — the JSON itself stays wherever you put it.
+                                                                </li>
+                                                                <li>
+                                                                    Make sure your Cloud project has <strong>billing enabled</strong> (free tier: 60 min/month of Speech-to-Text).
+                                                                </li>
+                                                            </ol>
+                                                            <p className="text-[11px] text-text-tertiary pt-2 mt-2 border-t border-border-subtle">
+                                                                <strong className="text-[var(--accent-primary)]">Easier path:</strong> if you only need multilingual (including Yoruba / Hausa / Igbo / Swahili) and don't want to set up a service account, switch Speech Provider to <strong>ElevenLabs Scribe</strong> — it's a single API-key paste, supports 99 languages.
+                                                            </p>
+                                                        </div>
+                                                    )}
+
                                                     <div className="flex gap-2">
                                                         <div className="flex-1 bg-bg-input border border-border-subtle rounded-lg px-3 py-2 text-xs text-text-secondary font-mono truncate">
                                                             {googleServiceAccountPath
-                                                                ? <span className="text-text-primary">{googleServiceAccountPath.split('/').pop()}</span>
+                                                                ? <span className="text-text-primary">{googleServiceAccountPath.split(/[\\/]/).pop()}</span>
                                                                 : <span className="text-text-tertiary italic">No file selected</span>}
                                                         </div>
                                                         <button
@@ -2953,18 +3354,39 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                                             <Upload size={14} /> Select File
                                                         </button>
                                                     </div>
-                                                    <p className="text-[10px] text-text-tertiary mt-2">
-                                                        Required for Google Cloud Speech-to-Text.
-                                                    </p>
                                                 </div>
                                             )}
 
                                             {/* API Key Input (non-Google providers) */}
                                             {sttProvider !== 'google' && (
                                                 <div className="bg-bg-card rounded-xl border border-border-subtle p-4 space-y-3">
-                                                    <label className="text-xs font-medium text-text-secondary block">
-                                                        {sttProvider === 'groq' ? 'Groq' : sttProvider === 'openai' ? 'OpenAI STT' : sttProvider === 'elevenlabs' ? 'ElevenLabs' : sttProvider === 'azure' ? 'Azure' : sttProvider === 'ibmwatson' ? 'IBM Watson' : sttProvider === 'soniox' ? 'Soniox' : 'Deepgram'} API Key
-                                                    </label>
+                                                    <div className="flex items-center justify-between">
+                                                        <label className="text-xs font-medium text-text-secondary block">
+                                                            {sttProvider === 'groq' ? 'Groq' : sttProvider === 'openai' ? 'OpenAI STT' : sttProvider === 'elevenlabs' ? 'ElevenLabs' : sttProvider === 'azure' ? 'Azure' : sttProvider === 'ibmwatson' ? 'IBM Watson' : sttProvider === 'soniox' ? 'Soniox' : 'Deepgram'} API Key
+                                                        </label>
+                                                        {/* v2.15.0: Get Key link per STT provider */}
+                                                        <button
+                                                            onClick={() => {
+                                                                const keyUrlMap: Record<string, string> = {
+                                                                    groq: 'https://console.groq.com/keys',
+                                                                    openai: 'https://platform.openai.com/api-keys',
+                                                                    deepgram: 'https://console.deepgram.com/',
+                                                                    elevenlabs: 'https://elevenlabs.io/app/settings/api-keys',
+                                                                    azure: 'https://portal.azure.com/',
+                                                                    ibmwatson: 'https://cloud.ibm.com/iam/apikeys',
+                                                                    soniox: 'https://console.soniox.com/',
+                                                                };
+                                                                const url = keyUrlMap[sttProvider] ?? 'https://console.deepgram.com/';
+                                                                // @ts-ignore
+                                                                window.electronAPI?.openExternal?.(url);
+                                                            }}
+                                                            className="text-[10px] flex items-center gap-1 text-text-tertiary hover:text-text-primary transition-colors"
+                                                            title="Open this provider's console in your browser"
+                                                        >
+                                                            <span className="uppercase tracking-wide">Get Key</span>
+                                                            <ExternalLink size={11} />
+                                                        </button>
+                                                    </div>
                                                     {sttProvider === 'openai' && (
                                                         <p className="text-[10px] text-text-tertiary mb-1.5">
                                                             This key is separate from your main AI Provider key.
@@ -3170,6 +3592,18 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                                     }
                                                 </p>
                                             </div>
+
+                                            {/* v2.5.5: STT provider compatibility hints. The support matrix
+                                                lives in electron/config/languages.ts; this list mirrors the
+                                                key incompatibilities most likely to trip users up. */}
+                                            {(['yoruba','hausa','igbo','swahili','zulu','xhosa','afrikaans','amharic','tamil','bengali','urdu','malay','filipino','hebrew','persian'].includes(recognitionLanguage) && (sttProvider === 'deepgram' || sttProvider === 'ibmwatson' || sttProvider === 'soniox')) && (
+                                                <div className="flex gap-2 items-start mt-2 px-3 py-2 rounded-lg bg-[var(--accent-primary)]/[0.08] border border-[var(--accent-primary)]/25">
+                                                    <AlertCircle size={14} className="text-[var(--accent-primary)] shrink-0 mt-0.5" />
+                                                    <p className="text-[11.5px] text-text-primary leading-relaxed">
+                                                        <span className="font-medium">{sttProvider === 'deepgram' ? 'Deepgram' : sttProvider === 'ibmwatson' ? 'IBM Watson' : 'Soniox'}</span> doesn't support this language. Switch to <span className="font-medium">Google Cloud</span>, <span className="font-medium">Azure</span>, or <span className="font-medium">ElevenLabs Scribe</span> (supports 99+ languages including African ones).
+                                                    </p>
+                                                </div>
+                                            )}
                                         </div>
                                     </div>
 
@@ -3293,7 +3727,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                                         }}
                                                         className={`w-11 h-6 rounded-full relative transition-colors shrink-0 ${useExperimentalSck ? 'bg-amber-500' : 'bg-bg-toggle-switch border border-border-muted'}`}
                                                     >
-                                                        <div className={`absolute top-1 left-1 w-4 h-4 rounded-full bg-white transition-transform ${useExperimentalSck ? 'translate-x-5' : 'translate-x-0'}`} />
+                                                        <div className={`absolute top-1 left-1 w-4 h-4 rounded-full bg-[#F1EDE6] shadow-[0_1px_2px_rgba(0,0,0,0.25)] transition-transform ${useExperimentalSck ? 'translate-x-5' : 'translate-x-0'}`} />
                                                     </div>
                                                 </div>
                                             </div>
@@ -3304,84 +3738,20 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
 
 
                             {activeTab === 'calendar' && (
-                                <div className="space-y-6 animated fadeIn h-full">
-                                    <div>
-                                        <h3 className="text-lg font-bold text-text-primary mb-2">Visible Calendars</h3>
-                                        <p className="text-xs text-text-secondary mb-4">Upcoming meetings are synchronized from these calendars</p>
-                                    </div>
+                                <GoogleCalendarSettings
+                                    isLight={isLight}
+                                    calendarStatus={calendarStatus}
+                                    setCalendarStatus={setCalendarStatus}
+                                    isCalendarsLoading={isCalendarsLoading}
+                                    setIsCalendarsLoading={setIsCalendarsLoading}
+                                />
+                            )}
 
-                                    <div className="bg-bg-card rounded-xl p-6 border border-border-subtle flex flex-col items-start gap-4">
-                                        {calendarStatus.connected ? (
-                                            <div className="w-full flex items-center justify-between">
-                                                <div className="flex items-center gap-4">
-                                                    <div className="w-10 h-10 rounded-lg bg-blue-500/10 flex items-center justify-center text-blue-500">
-                                                        <Calendar size={20} />
-                                                    </div>
-                                                    <div>
-                                                        <h4 className="text-sm font-medium text-text-primary">Google Calendar</h4>
-                                                        <p className="text-xs text-text-secondary">Connected as {calendarStatus.email || 'User'}</p>
-                                                    </div>
-                                                </div>
-
-                                                <button
-                                                    onClick={async () => {
-                                                        setIsCalendarsLoading(true);
-                                                        try {
-                                                            await window.electronAPI.calendarDisconnect();
-                                                            const status = await window.electronAPI.getCalendarStatus();
-                                                            setCalendarStatus(status);
-                                                        } catch (e) {
-                                                            console.error(e);
-                                                        } finally {
-                                                            setIsCalendarsLoading(false);
-                                                        }
-                                                    }}
-                                                    disabled={isCalendarsLoading}
-                                                    className="px-3 py-1.5 bg-bg-input hover:bg-bg-elevated border border-border-subtle text-text-primary rounded-md text-xs font-medium transition-colors"
-                                                >
-                                                    {isCalendarsLoading ? 'Disconnecting...' : 'Disconnect'}
-                                                </button>
-                                            </div>
-                                        ) : (
-                                            <div className="w-full py-4">
-                                                <div className="mb-4">
-                                                    <Calendar size={24} className="text-text-tertiary mb-3" />
-                                                    <h4 className="text-sm font-bold text-text-primary mb-1">No calendars</h4>
-                                                    <p className="text-xs text-text-secondary">Get started by connecting a Google account.</p>
-                                                </div>
-
-                                                <button
-                                                    onClick={async () => {
-                                                        setIsCalendarsLoading(true);
-                                                        try {
-                                                            const res = await window.electronAPI.calendarConnect();
-                                                            if (res.success) {
-                                                                const status = await window.electronAPI.getCalendarStatus();
-                                                                setCalendarStatus(status);
-                                                            }
-                                                        } catch (e) {
-                                                            console.error(e);
-                                                        } finally {
-                                                            setIsCalendarsLoading(false);
-                                                        }
-                                                    }}
-                                                    disabled={isCalendarsLoading}
-                                                    className={`px-4 py-2 rounded-lg text-xs font-medium transition-all flex items-center gap-2.5 ${isLight ? 'bg-bg-component hover:bg-bg-item-surface text-text-primary border border-border-subtle' : 'bg-[#303033] hover:bg-[#3A3A3D] text-white'}`}
-                                                >
-                                                    <svg viewBox="0 0 24 24" width="14" height="14" xmlns="http://www.w3.org/2000/svg">
-                                                        <g transform="matrix(1, 0, 0, 1, 27.009001, -39.238998)">
-                                                            <path fill="#4285F4" d="M -3.264 51.509 C -3.264 50.719 -3.334 49.969 -3.454 49.239 L -14.754 49.239 L -14.754 53.749 L -8.284 53.749 C -8.574 55.229 -9.424 56.479 -10.684 57.329 L -10.684 60.329 L -6.824 60.329 C -4.564 58.239 -3.264 55.159 -3.264 51.509 Z" />
-                                                            <path fill="#34A853" d="M -14.754 63.239 C -11.514 63.239 -8.804 62.159 -6.824 60.329 L -10.684 57.329 C -11.764 58.049 -13.134 58.489 -14.754 58.489 C -17.884 58.489 -20.534 56.379 -21.484 53.529 L -25.464 53.529 L -25.464 56.619 C -23.494 60.539 -19.444 63.239 -14.754 63.239 Z" />
-                                                            <path fill="#FBBC05" d="M -21.484 53.529 C -21.734 52.809 -21.864 52.039 -21.864 51.239 C -21.864 50.439 -21.734 49.669 -21.484 48.949 L -21.484 45.859 L -25.464 45.859 C -26.284 47.479 -26.754 49.299 -26.754 51.239 C -26.754 53.179 -26.284 54.999 -25.464 56.619 L -21.484 53.529 Z" />
-                                                            <path fill="#EA4335" d="M -14.754 43.989 C -12.984 43.989 -11.404 44.599 -10.154 45.789 L -6.734 42.369 C -8.804 40.429 -11.514 39.239 -14.754 39.239 C -19.444 39.239 -23.494 41.939 -25.464 45.859 L -21.484 48.949 C -20.534 46.099 -17.884 43.989 -14.754 43.989 Z" />
-                                                        </g>
-                                                    </svg>
-                                                    {isCalendarsLoading ? 'Connecting...' : 'Connect Google'}
-                                                </button>
-                                            </div>
-                                        )}
-                                    </div>
-                                </div>
+                            {activeTab === 'account' && (
+                                <AccountSettings
+                                    isLight={isLight}
+                                    onNavigateToAIProviders={() => setActiveTab('ai-providers')}
+                                />
                             )}
 
                             {activeTab === 'help' && (
@@ -3423,9 +3793,15 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
             <div
                 id="settings-mockup-wrapper"
                 className="fixed inset-0 z-[49] pointer-events-none transition-opacity duration-150"
-                style={{ opacity: isPreviewingOpacity ? 1 : 0 }}
+                style={{
+                    opacity: isPreviewingOpacity ? 1 : 0,
+                    // When not previewing, take the element fully out of the layout
+                    // so it can never swallow a stray click even if a descendant
+                    // regressed to pointer-events-auto.
+                    visibility: isPreviewingOpacity ? 'visible' : 'hidden',
+                }}
             >
-                <MockupNativelyInterface opacity={previewOverlayOpacity} />
+                <MockupSensiInterface opacity={previewOverlayOpacity} />
             </div>
         </AnimatePresence >
     );

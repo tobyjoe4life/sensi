@@ -265,6 +265,13 @@ const TopSearchPill: React.FC<TopSearchPillProps> = ({
                             stiffness: 150,
                             damping: 25
                         }}
+                        // v2.16.2 fix: at low resolutions, the fixed pixel
+                        // width was overlapping (and hiding) the right-side
+                        // WindowControls (minimize/maximize/close). Cap the
+                        // pill to stay within the viewport minus the space
+                        // needed by the left/right header groups (~440px on
+                        // Windows: 60 arrows + 340 right-actions + 40 gaps).
+                        style={{ maxWidth: 'calc(100vw - 440px)' }}
                         className="relative transform-gpu"
                     >
                         {/* Main Pill */}

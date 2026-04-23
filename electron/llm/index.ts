@@ -45,5 +45,6 @@ export {
     GROQ_FOLLOWUP_EMAIL_PROMPT,
     CODE_HINT_PROMPT,
     buildCodeHintMessage,
-    BRAINSTORM_MODE_PROMPT
+    BRAINSTORM_MODE_PROMPT,
+    ASSESSMENT_SOLVE_PROMPT
 } from "./prompts";

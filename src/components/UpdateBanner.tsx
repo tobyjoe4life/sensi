@@ -89,7 +89,8 @@ const UpdateBanner: React.FC = () => {
                 const dmgSuffix = isArm ? 'arm64' : 'x64';
                 setInstructionsArch(dmgSuffix);
                 const version = updateInfo?.version ? updateInfo.version.replace('v', '') : '2.0.8';
-                const url = `https://github.com/evinjohnn/natively-cluely-ai-assistant/releases/download/v${version}/Natively-${version}-${dmgSuffix}.dmg`;
+                // sensi M2-T3: updater disabled. Upstream GitHub release URL removed.
+                const url = `about:blank#sensi-updater-disabled-v${version}-${dmgSuffix}`;
                 window.electronAPI.openExternal(url);
                 setStatus('instructions');
             } catch (err) {

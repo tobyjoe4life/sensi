@@ -13,8 +13,20 @@
     "noUnusedLocals": false,
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true,
-    "skipLibCheck": true
+    "skipLibCheck": true,
+    // sensi M1: narrow path aliases matching vite.config.mts for shared
+    // registries and type definitions used by both main and renderer.
+    "baseUrl": ".",
+    "paths": {
+      "@shared/*": ["electron/shared/*"],
+      "@providers/*": ["electron/providers/*"]
+    }
   },
-  "include": ["src", "premium/src"], // React source files and optional premium components
+  // `src/` is the primary include. `electron/shared` and `electron/providers`
+  // are reached transitively via imports from files inside `src/` (resolved
+  // via the `@shared/*` and `@providers/*` path aliases above) — TypeScript
+  // type-checks imported files even when they are not in the explicit
+  // include globs.
+  "include": ["src", "premium/src"],
   "references": [{ "path": "./tsconfig.node.json" }]
 }

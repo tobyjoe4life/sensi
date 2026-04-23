@@ -7,7 +7,7 @@ interface FetchedModel {
 }
 
 interface ProviderCardProps {
-    providerId: 'gemini' | 'groq' | 'openai' | 'claude';
+    providerId: 'gemini' | 'groq' | 'openai' | 'claude' | 'minimax';
     providerName: string;
     apiKey: string;
     preferredModel?: string;
@@ -140,7 +140,7 @@ export const ProviderCard: React.FC<ProviderCardProps> = ({
     const selectedOption = fetchedModels.find(m => m.id === selectedModel);
 
     return (
-        <div className="bg-bg-item-surface rounded-xl p-5 border border-border-subtle">
+        <div className="bg-bg-item-surface rounded-xl p-5 border border-border-subtle pointer-events-auto">
             <div className="mb-2 flex items-center justify-between">
                 <label className="flex items-center text-xs font-medium text-text-primary uppercase tracking-wide">
                     {providerName} API Key

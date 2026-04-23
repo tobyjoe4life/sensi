@@ -6,16 +6,46 @@ import fs from 'fs';
 import path from 'path';
 import { EventEmitter } from 'events';
 
-// Configuration
-// In a real app, these should be in environment variables or build configs
-const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || "YOUR_CLIENT_ID_HERE";
-const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || "YOUR_CLIENT_SECRET_HERE";
+// v2.5.4: OAuth credentials are supplied by the user via Settings → Calendar
+// (stored encrypted in CredentialsManager). Previous env-var-only approach
+// never worked for packaged users. Env vars are still honored as a fallback
+// for developer convenience.
 const REDIRECT_URI = "http://localhost:11111/auth/callback";
-const SCOPES = ["https://www.googleapis.com/auth/calendar.readonly"];
+const SCOPES = ["https://www.googleapis.com/auth/calendar.readonly", "https://www.googleapis.com/auth/userinfo.email"];
 const TOKEN_PATH = path.join(app.getPath('userData'), 'calendar_tokens.enc');
 
-if (GOOGLE_CLIENT_ID === "YOUR_CLIENT_ID_HERE" || GOOGLE_CLIENT_SECRET === "YOUR_CLIENT_SECRET_HERE") {
-    console.warn('[CalendarManager] Google OAuth credentials are using defaults. Calendar features will not work until valid credentials are provided via env vars.');
+/**
+ * Resolve OAuth creds at call time so users who paste them in Settings don't
+ * need to restart sensi. Lazy-require keeps CalendarManager loadable before
+ * CredentialsManager is ready (e.g. unit tests).
+ */
+function getOauthCreds(): { clientId: string; clientSecret: string } | null {
+    // Env-var override for developers
+    const envId = process.env.GOOGLE_CLIENT_ID;
+    const envSecret = process.env.GOOGLE_CLIENT_SECRET;
+    if (envId && envSecret) {
+        return { clientId: envId, clientSecret: envSecret };
+    }
+    try {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const { CredentialsManager } = require('./CredentialsManager');
+        const mgr = CredentialsManager.getInstance();
+        const clientId = mgr.getGoogleOauthClientId?.();
+        const clientSecret = mgr.getGoogleOauthClientSecret?.();
+        if (clientId && clientSecret) {
+            return { clientId, clientSecret };
+        }
+    } catch (err) {
+        console.warn('[CalendarManager] Failed to read OAuth creds from CredentialsManager:', err);
+    }
+    return null;
+}
+
+export class CalendarOauthMissingError extends Error {
+    public readonly code = 'OAUTH_CREDS_MISSING';
+    constructor() {
+        super('Google OAuth credentials are not configured. Open Settings → Calendar and paste a Client ID + Client Secret from Google Cloud Console.');
+    }
 }
 
 export interface CalendarEvent {
@@ -33,6 +63,7 @@ export class CalendarManager extends EventEmitter {
     private refreshToken: string | null = null;
     private expiryDate: number | null = null;
     private isConnected: boolean = false;
+    private userEmail: string | null = null;
     private updateInterval: NodeJS.Timeout | null = null;
 
     private constructor() {
@@ -56,6 +87,10 @@ export class CalendarManager extends EventEmitter {
     // =========================================================================
 
     public async startAuthFlow(): Promise<void> {
+        // v2.5.4: fail fast with a clear error the IPC handler can surface.
+        if (!getOauthCreds()) {
+            throw new CalendarOauthMissingError();
+        }
         return new Promise((resolve, reject) => {
             // 1. Create Loopback Server
             const server = http.createServer(async (req, res) => {
@@ -73,7 +108,7 @@ export class CalendarManager extends EventEmitter {
                         }
 
                         if (code) {
-                            res.end('Authentication successful! You can close this window and return to Natively.');
+                            res.end('Authentication successful! You can close this window and return to sensi.');
                             server.close();
 
                             // 2. Exchange code for tokens
@@ -91,7 +126,12 @@ export class CalendarManager extends EventEmitter {
             server.listen(11111, () => {
                 // 3. Open Browser
                 const authUrl = this.getAuthUrl();
-                shell.openExternal(authUrl);
+                if (authUrl) {
+                    shell.openExternal(authUrl);
+                } else {
+                    server.close();
+                    reject(new CalendarOauthMissingError());
+                }
             });
 
             server.on('error', (err) => {
@@ -105,6 +145,7 @@ export class CalendarManager extends EventEmitter {
         this.refreshToken = null;
         this.expiryDate = null;
         this.isConnected = false;
+        this.userEmail = null;
 
         if (fs.existsSync(TOKEN_PATH)) {
             fs.unlinkSync(TOKEN_PATH);
@@ -113,15 +154,72 @@ export class CalendarManager extends EventEmitter {
         this.emit('connection-changed', false);
     }
 
-    public getConnectionStatus(): { connected: boolean; email?: string, lastSync?: number } {
-        // We don't store email in tokens usually, but we could fetch it.
-        // For now, simpler boolean.
-        return { connected: this.isConnected };
+    /**
+     * Adopt Google OAuth tokens obtained through the sensi-cloud sign-in
+     * flow (AuthManager). Lets the streamlined sign-in double as a Calendar
+     * connection so the user doesn't have to complete two OAuth consents.
+     *
+     * `accessExpiresAt` is unix seconds (matches the sensi:// callback
+     * format); internally we store ms since we compare against Date.now().
+     *
+     * Separate from the BYO-OAuth loopback flow — this path doesn't require
+     * a user-supplied client_id / client_secret because the backend's Google
+     * Web App client issued the tokens. Refresh still requires creds; if the
+     * user never connects BYO-OAuth creds and this token expires, we'll
+     * quietly disconnect and prompt them to sign in again.
+     */
+    public adoptGoogleOAuthTokens(tokens: {
+        accessToken: string;
+        accessExpiresAt: number; // unix seconds
+        refreshToken?: string;
+    }): void {
+        this.accessToken = tokens.accessToken;
+        if (tokens.refreshToken) {
+            this.refreshToken = tokens.refreshToken;
+        }
+        this.expiryDate = tokens.accessExpiresAt * 1000;
+        this.isConnected = true;
+        this.saveTokens();
+        this.emit('connection-changed', true);
+
+        // Best-effort: populate the connected email and prime the events
+        // cache so Upcoming Meetings shows something on the first paint.
+        void this.fetchUserEmail();
+        void this.fetchUpcomingEvents();
     }
 
-    private getAuthUrl(): string {
+    public getConnectionStatus(): { connected: boolean; email?: string, lastSync?: number } {
+        return { connected: this.isConnected, email: this.userEmail ?? undefined };
+    }
+
+    /**
+     * Fetch the connected user's email via Google userinfo endpoint so the
+     * Settings UI can display which account is connected. Best-effort —
+     * we never throw from here; failure just leaves userEmail null.
+     */
+    private async fetchUserEmail(): Promise<void> {
+        if (!this.accessToken) return;
+        try {
+            const res = await axios.get('https://www.googleapis.com/oauth2/v2/userinfo', {
+                headers: { Authorization: `Bearer ${this.accessToken}` },
+                timeout: 5000,
+            });
+            if (res.data?.email) {
+                this.userEmail = res.data.email;
+                this.saveTokens();
+                this.emit('connection-changed', true);
+            }
+        } catch (err) {
+            // If userinfo scope wasn't granted we just skip — events still work
+            console.log('[CalendarManager] userinfo fetch skipped:', (err as Error)?.message);
+        }
+    }
+
+    private getAuthUrl(): string | null {
+        const creds = getOauthCreds();
+        if (!creds) return null;
         const params = new URLSearchParams({
-            client_id: GOOGLE_CLIENT_ID,
+            client_id: creds.clientId,
             redirect_uri: REDIRECT_URI,
             response_type: 'code',
             scope: SCOPES.join(' '),
@@ -132,11 +230,13 @@ export class CalendarManager extends EventEmitter {
     }
 
     private async exchangeCodeForToken(code: string) {
+        const creds = getOauthCreds();
+        if (!creds) throw new CalendarOauthMissingError();
         try {
             const response = await axios.post('https://oauth2.googleapis.com/token', {
                 code,
-                client_id: GOOGLE_CLIENT_ID,
-                client_secret: GOOGLE_CLIENT_SECRET,
+                client_id: creds.clientId,
+                client_secret: creds.clientSecret,
                 redirect_uri: REDIRECT_URI,
                 grant_type: 'authorization_code'
             });
@@ -184,6 +284,9 @@ export class CalendarManager extends EventEmitter {
         this.saveTokens();
         this.emit('connection-changed', true);
 
+        // v2.5.4: fetch connected email so Settings UI shows the account.
+        void this.fetchUserEmail();
+
         // Initial fetch
         this.fetchUpcomingEvents();
     }
@@ -192,11 +295,13 @@ export class CalendarManager extends EventEmitter {
         if (!this.refreshToken) {
             throw new Error('No refresh token available');
         }
+        const creds = getOauthCreds();
+        if (!creds) throw new CalendarOauthMissingError();
 
         try {
             const response = await axios.post('https://oauth2.googleapis.com/token', {
-                client_id: GOOGLE_CLIENT_ID,
-                client_secret: GOOGLE_CLIENT_SECRET,
+                client_id: creds.clientId,
+                client_secret: creds.clientSecret,
                 refresh_token: this.refreshToken,
                 grant_type: 'refresh_token'
             });
@@ -222,7 +327,8 @@ export class CalendarManager extends EventEmitter {
         const data = JSON.stringify({
             accessToken: this.accessToken,
             refreshToken: this.refreshToken,
-            expiryDate: this.expiryDate
+            expiryDate: this.expiryDate,
+            userEmail: this.userEmail,
         });
 
         const encrypted = safeStorage.encryptString(data);
@@ -245,11 +351,16 @@ export class CalendarManager extends EventEmitter {
             this.refreshToken = data.refreshToken;
             this.expiryDate = data.expiryDate;
 
+            this.userEmail = data.userEmail ?? null;
+
             if (this.accessToken && this.refreshToken) {
                 this.isConnected = true;
                 // Check expiry
                 if (this.expiryDate && Date.now() >= this.expiryDate) {
                     this.refreshAccessToken();
+                } else if (!this.userEmail) {
+                    // Best-effort backfill for older installs that didn't store email
+                    void this.fetchUserEmail();
                 }
             }
         } catch (error) {
@@ -291,29 +402,48 @@ export class CalendarManager extends EventEmitter {
         });
     }
 
+    // Track events the user has dismissed so a fresh poll doesn't re-alert
+    // for the same event. In-memory only — new app launch starts fresh.
+    private dismissedEventIds: Set<string> = new Set();
+
+    public dismissEvent(eventId: string): void {
+        this.dismissedEventIds.add(eventId);
+    }
+
     private showNotification(event: CalendarEvent) {
+        if (this.dismissedEventIds.has(event.id)) {
+            console.log(`[CalendarManager] Suppressing notification for dismissed event: ${event.id}`);
+            return;
+        }
+
+        // Primary channel: emit an in-app alert so the Launcher (if alive) can
+        // show a rich modal prompt with "Yes, get ready" / "Not this one".
+        // Main.ts forwards this to every renderer AND raises the window.
+        this.emit('event-imminent', event);
+
+        // Secondary channel: fire the native OS notification too, so the user
+        // is still alerted if the sensi window is hidden or on another desktop.
         const { Notification } = require('electron');
         const notif = new Notification({
             title: 'Meeting starting soon',
-            body: `"${event.title}" starts in 2 minutes. Start Natively?`,
+            body: `"${event.title}" starts in 2 minutes. Bring sensi along?`,
             actions: [
-                { type: 'button', text: 'Start Meeting' },
-                { type: 'button', text: 'Dismiss' }
+                { type: 'button', text: 'Yes' },
+                { type: 'button', text: 'Not this one' }
             ],
             sound: true
         });
 
-        notif.on('action', (event_unused: any, index: number) => {
+        notif.on('action', (_evt: any, index: number) => {
             if (index === 0) {
-                // Start Meeting
-                // We need to tell the main process to open window and start meeting
-                // Ideally we emit an event that AppState listens to
                 this.emit('start-meeting-requested', event);
+            } else if (index === 1) {
+                this.dismissEvent(event.id);
             }
         });
 
         notif.on('click', () => {
-            // Just open window
+            // Clicking the body (not an action button) just brings sensi forward
             this.emit('open-requested');
         });
 

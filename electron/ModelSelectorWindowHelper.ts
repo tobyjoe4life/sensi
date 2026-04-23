@@ -128,9 +128,12 @@ export class ModelSelectorWindowHelper {
     }
 
     private createWindow(x?: number, y?: number, showWhenReady: boolean = true): void {
+        // sensi M1 Step 4: bumped from 140×200 to fit the new provider-grouped
+        // layout. Each provider section has a header label plus 1-2 model rows.
+        // Keep this in sync with the inner div size in src/components/ModelSelectorWindow.tsx.
         const windowSettings: Electron.BrowserWindowConstructorOptions = {
-            width: 140,
-            height: 200,
+            width: 220,
+            height: 360,
             frame: false,
             transparent: true,
             resizable: false,

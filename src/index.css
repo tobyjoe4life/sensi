@@ -32,64 +32,80 @@
   /* User Spec: Detectable Container */
 
   --bg-toggle-switch: #303033;
-  /* User Spec: Toggle Button */
-  --bg-item-surface: #27272A;
-  /* User Spec: Icons & Input Backgrounds */
-  --bg-item-active: #2C2C2C;
-  /* Selected state */
+  /* ═════════════════════════════════════════════════════════════════════
+     Direction B — "Midnight atelier" (v2.5.0 redesign)
 
-  --bg-primary: #000000;
-  /* Fallback */
-  --bg-secondary: #050505;
-  /* Fallback */
-  --bg-elevated: #151515;
-  /* Fallback */
-  --bg-input: #1A1A1A;
-  /* Fallback */
+     Palette principles:
+       - Canvas is warm charcoal (#16151A), never pure black — ink on vellum.
+       - Surfaces layer with slightly warmer greys, not pure neutrals.
+       - Accent is brass (#B8915C) — quiet craftsman signature replacing
+         the cool blue #3b82f6 that read as generic-Electron-app.
+       - Borders are hair-thin warm whites rather than cool #333.
+       - Text runs warm-white → warm-grey → muted taupe, not pure white
+         on pure black (too high-contrast, fatiguing for long meetings).
+     ═════════════════════════════════════════════════════════════════════ */
 
-  --text-primary: #ffffff;
-  --text-secondary: #A0A0A0;
-  --text-tertiary: #606060;
+  /* ── Interactive fills (cards, chips, hover states) ── */
+  --bg-item-surface: #24222A;   /* Chip/card fill over canvas — warmer than #27272A */
+  --bg-item-active:  #2E2B35;   /* Active/hover — 2 steps warmer */
 
-  --border-subtle: transparent;
-  --border-muted: #333333;
+  /* ── Page + surface stack ── */
+  --bg-primary:   #16151A;   /* Canvas — warm charcoal, not pure black */
+  --bg-secondary: #1B1A1F;   /* Section panels */
+  --bg-elevated:  #22202A;   /* Cards, modals, dropdown surfaces */
+  --bg-input:     #1E1C23;   /* Inputs & recessed areas */
 
-  --accent-primary: #3b82f6;
-  --accent-muted: rgba(59, 130, 246, 0.15);
+  --bg-card:      #22202A;   /* Alias for generic card fill */
+  --bg-main:      #16151A;   /* Alias for canvas background */
+  --bg-sidebar:   #1B1A1F;   /* Settings sidebar */
 
-  --bg-component: #262626;
-  /* Specific legacy value */
+  /* ── Typography — warm greys, not pure ── */
+  --text-primary:   #F1EDE6;  /* Warm vellum white */
+  --text-secondary: #A29C91;  /* Warm grey */
+  --text-tertiary:  #6B6459;  /* Muted taupe */
 
-  --overlay-bg: rgba(30, 30, 30, 0.65);
+  /* ── Borders — hairline warm whites ── */
+  --border-subtle: rgba(255, 248, 232, 0.05);
+  --border-muted:  rgba(255, 248, 232, 0.10);
 
-  --overlay-opacity: 0.65;
-  --overlay-border: rgba(255, 255, 255, 0.12);
-  --overlay-border-soft: rgba(255, 255, 255, 0.1);
-  --overlay-panel-bg: rgb(30 30 30 / calc(0.05 + (var(--overlay-opacity) * 0.55)));
-  --overlay-pill-bg: rgb(30 30 30 / calc(0.04 + (var(--overlay-opacity) * 0.48)));
-  --overlay-transcript-bg: rgb(30 30 30 / calc(0.02 + (var(--overlay-opacity) * 0.24)));
-  --overlay-chip-bg: rgba(255, 255, 255, 0.035);
-  --overlay-chip-hover-bg: rgba(255, 255, 255, 0.11);
-  --overlay-input-bg: rgba(255, 255, 255, 0.05);
-  --overlay-input-hover-bg: rgba(255, 255, 255, 0.12);
-  --overlay-input-focus-bg: rgba(255, 255, 255, 0.16);
-  --overlay-control-bg: rgba(255, 255, 255, 0.05);
-  --overlay-control-hover-bg: rgba(255, 255, 255, 0.12);
-  --overlay-code-bg: rgba(255, 255, 255, 0.03);
-  --overlay-code-border: rgba(255, 255, 255, 0.08);
-  --overlay-code-header-bg: rgba(255, 255, 255, 0.05);
-  --overlay-inline-code-bg: rgba(255, 255, 255, 0.07);
-  --overlay-icon-bg: rgba(255, 255, 255, 0.05);
-  --overlay-icon-hover-bg: rgba(255, 255, 255, 0.12);
-  --overlay-panel-shadow: rgb(0 0 0 / calc(0.05 + (var(--overlay-opacity) * 0.18)));
-  --overlay-pill-shadow: rgb(0 0 0 / calc(0.03 + (var(--overlay-opacity) * 0.12)));
-  --overlay-text-primary: rgba(255, 255, 255, 0.985);
-  --overlay-text-secondary: rgba(255, 255, 255, 0.9);
-  --overlay-text-muted: rgba(255, 255, 255, 0.7);
-  --overlay-text-placeholder: rgba(255, 255, 255, 0.58);
-  --overlay-text-strong: #ffffff;
-  --overlay-shell-blur: calc(2px + (var(--overlay-opacity) * 18px));
-  --overlay-pill-blur: calc(1px + (var(--overlay-opacity) * 12px));
+  /* ── Accent: brass — sensi's new signature ── */
+  --accent-primary: #B8915C;                   /* Brass / aged bronze */
+  --accent-muted:   rgba(184, 145, 92, 0.16);
+  --accent-soft:    rgba(184, 145, 92, 0.08);
+
+  --bg-component: #242230;
+  --bg-toggle-switch: #2B2830;
+
+  --overlay-bg: rgba(30, 28, 36, 0.70);
+
+  --overlay-opacity: 0.70;
+  --overlay-border:      rgba(255, 248, 232, 0.10);
+  --overlay-border-soft: rgba(255, 248, 232, 0.06);
+  --overlay-panel-bg:      rgb(30 28 36 / calc(0.12 + (var(--overlay-opacity) * 0.58)));
+  --overlay-pill-bg:       rgb(30 28 36 / calc(0.10 + (var(--overlay-opacity) * 0.52)));
+  --overlay-transcript-bg: rgb(30 28 36 / calc(0.04 + (var(--overlay-opacity) * 0.28)));
+  --overlay-chip-bg:        rgba(255, 248, 232, 0.04);
+  --overlay-chip-hover-bg:  rgba(255, 248, 232, 0.10);
+  --overlay-input-bg:         rgba(255, 248, 232, 0.05);
+  --overlay-input-hover-bg:   rgba(255, 248, 232, 0.09);
+  --overlay-input-focus-bg:   rgba(255, 248, 232, 0.13);
+  --overlay-control-bg:        rgba(255, 248, 232, 0.05);
+  --overlay-control-hover-bg:  rgba(255, 248, 232, 0.11);
+  --overlay-code-bg:          rgba(255, 248, 232, 0.03);
+  --overlay-code-border:      rgba(255, 248, 232, 0.08);
+  --overlay-code-header-bg:   rgba(255, 248, 232, 0.05);
+  --overlay-inline-code-bg:   rgba(255, 248, 232, 0.07);
+  --overlay-icon-bg:          rgba(255, 248, 232, 0.05);
+  --overlay-icon-hover-bg:    rgba(255, 248, 232, 0.11);
+  --overlay-panel-shadow: rgb(0 0 0 / calc(0.10 + (var(--overlay-opacity) * 0.24)));
+  --overlay-pill-shadow:  rgb(0 0 0 / calc(0.05 + (var(--overlay-opacity) * 0.16)));
+  --overlay-text-primary:     rgba(241, 237, 230, 0.985);
+  --overlay-text-secondary:   rgba(241, 237, 230, 0.86);
+  --overlay-text-muted:       rgba(241, 237, 230, 0.60);
+  --overlay-text-placeholder: rgba(241, 237, 230, 0.48);
+  --overlay-text-strong: #F1EDE6;
+  --overlay-shell-blur:      calc(2px + (var(--overlay-opacity) * 18px));
+  --overlay-pill-blur:       calc(1px + (var(--overlay-opacity) * 12px));
   --overlay-transcript-blur: calc(var(--overlay-opacity) * 6px);
 }
 
@@ -135,9 +151,10 @@
   --border-subtle:     rgba(0, 0, 0, 0.07);   /* card outlines, dividers          */
   --border-muted:      rgba(0, 0, 0, 0.11);   /* inputs, tables                   */
 
-  /* ── Accent ── */
-  --accent-primary:    #2563EB;   /* blue-600 — accessible, confident             */
-  --accent-muted:      rgba(37, 99, 235, 0.10);
+  /* ── Accent: brass (Direction B, v2.5.0) ── */
+  --accent-primary:    #8A6B3E;   /* Deeper brass for light mode — AA contrast on white */
+  --accent-muted:      rgba(138, 107, 62, 0.10);
+  --accent-soft:       rgba(138, 107, 62, 0.06);
 
   --bg-component:      #F3F4F6;
 

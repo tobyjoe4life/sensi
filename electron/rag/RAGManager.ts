@@ -180,8 +180,12 @@ export class RAGManager {
         // Build prompt with intent hint
         const prompt = buildRAGPrompt(query, context.formattedContext, 'meeting', context.intent);
 
-        // Stream response
-        const stream = this.llmHelper.streamChatWithGemini(prompt, undefined, undefined, true);
+        // M3-FIX: route through the active-provider dispatcher (`streamChat`)
+        // instead of the Gemini-only path so RAG responses follow the user's
+        // selected provider. `ignoreKnowledgeMode: true` keeps the knowledge-
+        // mode intercept from double-injecting context on top of the RAG
+        // prompt we just built via `buildRAGPrompt`.
+        const stream = this.llmHelper.streamChat(prompt, undefined, undefined, undefined, true);
 
         for await (const chunk of stream) {
             if (abortSignal?.aborted) break;
@@ -211,8 +215,10 @@ export class RAGManager {
         // Build prompt with intent hint
         const prompt = buildRAGPrompt(query, context.formattedContext, 'global', context.intent);
 
-        // Stream response
-        const stream = this.llmHelper.streamChatWithGemini(prompt, undefined, undefined, true);
+        // M3-FIX: route through the active-provider dispatcher (`streamChat`)
+        // instead of the Gemini-only path so RAG responses follow the user's
+        // selected provider. See matching comment in `queryMeeting` above.
+        const stream = this.llmHelper.streamChat(prompt, undefined, undefined, undefined, true);
 
         for await (const chunk of stream) {
             if (abortSignal?.aborted) break;

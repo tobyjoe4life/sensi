@@ -17,8 +17,9 @@ export interface ParsedReleaseNotes {
 export class ReleaseNotesManager {
     private static instance: ReleaseNotesManager;
     private cachedNotes: ParsedReleaseNotes | null = null;
-    private readonly repoOwner = "evinjohnn";
-    private readonly repoName = "natively-cluely-ai-assistant";
+    // sensi M2-T3: updater gated behind SENSI_ENABLE_UPDATER; repo refs neutralized.
+    private readonly repoOwner = "sensi-updater-disabled";
+    private readonly repoName = "sensi-updater-disabled";
 
     private constructor() { }
 

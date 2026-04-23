@@ -32,6 +32,17 @@ export class WindowHelper {
   private contentProtection: boolean = false
   private opacityTimeout: NodeJS.Timeout | null = null
 
+  // PACKAGING-01 fix (2026-04-17): DWM z-order re-assertion timer.
+  // Windows DWM silently demotes the overlay's HWND below fullscreen apps
+  // (Zoom/Teams screen-share, any exclusive-fullscreen window). The comment
+  // at switchToOverlay line 580 already acknowledges this on the hide/show
+  // path — but demotion also happens passively while the overlay is just
+  // sitting there, without any sensi code running. Cheap fix: periodically
+  // re-assert alwaysOnTop while the overlay is visible. No cost when the
+  // overlay is hidden or when running on non-Windows platforms.
+  private zOrderReassertTimer: NodeJS.Timeout | null = null;
+  private static readonly Z_ORDER_REASSERT_INTERVAL_MS = 3000;
+
   // Constants
   private static readonly OVERLAY_DEFAULT_WIDTH = 600;
   private static readonly OVERLAY_MIN_HEIGHT = 216;
@@ -41,6 +52,40 @@ export class WindowHelper {
 
   constructor(appState: AppState) {
     this.appState = appState
+  }
+
+  /**
+   * PACKAGING-01 fix: start a light periodic check that re-asserts the
+   * overlay's alwaysOnTop flag. Safe to call repeatedly — idempotent.
+   * Windows-only; no-op on macOS / Linux where DWM demotion doesn't happen.
+   */
+  private startZOrderReassertTimer(): void {
+    if (process.platform !== 'win32') return;
+    if (this.zOrderReassertTimer) return;
+    this.zOrderReassertTimer = setInterval(() => {
+      const win = this.overlayWindow;
+      if (!win || win.isDestroyed()) return;
+      if (!win.isVisible()) return;
+      // Re-assert. If DWM already has us on top, this is a cheap no-op.
+      // If DWM demoted us behind a fullscreen window, this brings us back.
+      // Level 'screen-saver' is Electron's highest z-order — stays above
+      // exclusive fullscreen apps (Chrome tab fullscreen, Zoom screen share,
+      // Teams fullscreen, etc.) where 'floating' loses.
+      try {
+        win.setAlwaysOnTop(true, 'screen-saver');
+      } catch (e) {
+        // Window could have been destroyed between the visibility check
+        // and the call. Swallow — next tick either finds it gone (timer
+        // no-ops) or recovers.
+      }
+    }, WindowHelper.Z_ORDER_REASSERT_INTERVAL_MS);
+  }
+
+  private stopZOrderReassertTimer(): void {
+    if (this.zOrderReassertTimer) {
+      clearInterval(this.zOrderReassertTimer);
+      this.zOrderReassertTimer = null;
+    }
   }
 
   private getDisplayWorkArea(bounds?: Electron.Rectangle): Electron.Rectangle {
@@ -174,8 +219,8 @@ export class WindowHelper {
         if (mode === 'none') {
           if (isMac) {
             return app.isPackaged
-              ? path.join(process.resourcesPath, "natively.icns")
-              : path.resolve(__dirname, "../../assets/natively.icns");
+              ? path.join(process.resourcesPath, "assets/icon.icns")
+              : path.resolve(__dirname, "../../assets/icon.icns");
           } else if (isWin) {
             return app.isPackaged
               ? path.join(process.resourcesPath, "assets/icons/win/icon.ico")
@@ -425,6 +470,7 @@ export class WindowHelper {
     this.launcherWindow?.hide()
     this.overlayWindow?.hide()
     this.isWindowVisible = false
+    this.stopZOrderReassertTimer();
   }
 
   // Apply or remove click-through (mouse passthrough) on the overlay window.
@@ -465,8 +511,10 @@ export class WindowHelper {
     // Re-assert z-order on Windows before showing — same DWM demotion risk as
     // switchToOverlay(). Must come before show()/showInactive() so the window
     // lands at the correct level on first paint (issue #136).
+    // 'screen-saver' level keeps the overlay above exclusive fullscreen apps
+    // (Chrome tab fullscreen, Zoom/Teams screen share) where 'floating' loses.
     if (process.platform === 'win32') {
-      this.overlayWindow.setAlwaysOnTop(true, 'floating');
+      this.overlayWindow.setAlwaysOnTop(true, 'screen-saver');
     }
 
     if (this.appState.getOverlayMousePassthrough()) {
@@ -533,6 +581,10 @@ export class WindowHelper {
     this.currentWindowMode = 'overlay';
     KeybindManager.getInstance().setMode('overlay'); // Adapted from public PR #123 — verify premium interaction
 
+    // PACKAGING-01 fix: start the DWM z-order re-assertion timer so the
+    // overlay can't silently fall behind a fullscreen interview app.
+    this.startZOrderReassertTimer();
+
     // Tell the overlay renderer to expand to full size (e.g. after being minimised)
     this.overlayWindow?.webContents.send('ensure-expanded');
 
@@ -577,8 +629,9 @@ export class WindowHelper {
         this.opacityTimeout = setTimeout(() => {
           if (this.overlayWindow && !this.overlayWindow.isDestroyed()) {
             this.overlayWindow.setOpacity(1);
-            // Re-assert z-order on Windows — DWM can silently demote the HWND after hide/show
-            this.overlayWindow.setAlwaysOnTop(true, 'floating');
+            // Re-assert z-order on Windows — DWM can silently demote the HWND after hide/show.
+            // 'screen-saver' level stays above fullscreen Chrome/Zoom/Teams.
+            this.overlayWindow.setAlwaysOnTop(true, 'screen-saver');
             if (!inactive) this.overlayWindow.focus();
           }
         }, 60);
@@ -592,8 +645,9 @@ export class WindowHelper {
         // window where the HWND is focused at the wrong z-level (issue #136).
         // Skipped on macOS — calling setAlwaysOnTop triggers [NSApp activate] which
         // steals focus from Zoom/browser even when showInactive() was used.
+        // 'screen-saver' level stays above fullscreen Chrome/Zoom/Teams.
         if (process.platform === 'win32') {
-          this.overlayWindow.setAlwaysOnTop(true, 'floating');
+          this.overlayWindow.setAlwaysOnTop(true, 'screen-saver');
         }
         if (inactive) this.overlayWindow.showInactive(); else this.overlayWindow.show();
         // Only grab focus for explicit user-initiated shows (not shortcut/ghost shows)
@@ -612,6 +666,10 @@ export class WindowHelper {
     console.log(`[WindowHelper] Switching to LAUNCHER (inactive: ${!!inactive})`);
     this.currentWindowMode = 'launcher';
     KeybindManager.getInstance().setMode('launcher'); // Adapted from public PR #123 — verify premium interaction
+
+    // PACKAGING-01 fix: overlay is no longer the active mode; stop the
+    // z-order re-assertion timer until we switch back.
+    this.stopZOrderReassertTimer();
 
     // Show Launcher FIRST
     if (this.launcherWindow && !this.launcherWindow.isDestroyed()) {

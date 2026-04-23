@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useStreamBuffer } from '../hooks/useStreamBuffer';
+import { useAutoScrollToBottom } from '../hooks/useAutoScrollToBottom';
 import { X, Copy, Check } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
-import nativelyIcon from './icon.png';
+import { SensiMark } from './SensiLogoMark';
 
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -195,7 +196,14 @@ const MeetingChatOverlay: React.FC<MeetingChatOverlayProps> = ({
 
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const chatWindowRef = useRef<HTMLDivElement>(null);
+    const scrollContainerRef = useRef<HTMLDivElement>(null);
     const streamBuffer = useStreamBuffer();
+
+    // POLISH-01 / D028c: auto-scroll during streaming if user is near
+    // bottom. Trigger uses messages.length + latest text length so
+    // every token append re-fires the follow effect.
+    const autoScrollTrigger = `${messages.length}:${messages[messages.length - 1]?.content?.length ?? 0}`;
+    useAutoScrollToBottom(scrollContainerRef, autoScrollTrigger);
 
     // Submit initial query when overlay opens
     useEffect(() => {
@@ -507,7 +515,8 @@ ${contextString}`;
                         {/* Header with close button */}
                         <div className="flex items-center justify-between px-4 py-3 border-b border-border-subtle shrink-0">
                             <div className="flex items-center gap-2 text-text-tertiary">
-                                <img src={nativelyIcon} className="w-3.5 h-3.5 force-black-icon opacity-50" alt="logo" />
+                                {/* POLISH-01a: SVG mark replaces raster icon.png's upstream "N" glyph */}
+                                <SensiMark variant="mark" size={14} className="opacity-50" />
                                 <span className="text-[13px] font-medium">Search this meeting</span>
                             </div>
                             <button
@@ -519,7 +528,7 @@ ${contextString}`;
                         </div>
 
                         {/* Messages area - scrollable */}
-                        <div className="flex-1 overflow-y-auto px-6 py-4 pb-32 custom-scrollbar">
+                        <div ref={scrollContainerRef} className="flex-1 overflow-y-auto px-6 py-4 pb-32 custom-scrollbar">
                             {messages.map((msg) => (
                                 msg.role === 'user'
                                     ? <UserMessage key={msg.id} content={msg.content} />

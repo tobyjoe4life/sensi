@@ -2,15 +2,13 @@ import React, { useState, useEffect } from 'react';
 import { ToggleLeft, ToggleRight, Search, Zap, Calendar, ArrowRight, ArrowLeft, MoreHorizontal, Globe, Clock, ChevronRight, Settings, RefreshCw, Eye, EyeOff, Ghost, Plus, Mail, Link as LinkIcon, ChevronDown, Trash2, Bell, Check, Download, DownloadCloud, CheckCircle, AlertCircle } from 'lucide-react';
 import { generateMeetingPDF } from '../utils/pdfGenerator';
 import icon from "./icon.png";
+import { SensiMark } from './SensiLogoMark';
 import mainui from "../UI_comp/mainui.png";
-import calender from "../UI_comp/calender.png";
-import ConnectCalendarButton from './ui/ConnectCalendarButton';
 import MeetingDetails from './MeetingDetails';
 import TopSearchPill from './TopSearchPill';
 import GlobalChatOverlay from './GlobalChatOverlay';
 import { motion, AnimatePresence } from 'framer-motion';
-import { FeatureSpotlight } from './FeatureSpotlight';
-import { analytics } from '../lib/analytics/analytics.service'; // Added analytics import
+import { UpcomingMeetingsPanel } from './UpcomingMeetingsPanel';
 import { useShortcuts } from '../hooks/useShortcuts';
 import { useResolvedTheme } from '../hooks/useResolvedTheme';
 import { isMac } from '../utils/platformUtils';
@@ -79,18 +77,81 @@ const formatTime = (dateStr: string) => {
 const Launcher: React.FC<LauncherProps> = ({ onStartMeeting, onOpenSettings, onPageChange, ollamaPullStatus = 'idle', ollamaPullPercent = 0, ollamaPullMessage = '' }) => {
     const [meetings, setMeetings] = useState<Meeting[]>([]);
     const [isDetectable, setIsDetectable] = useState(false);
+    // v2.6.1: mirror of SettingsManager.liveCodingModeEnabled so the launcher
+    // can show a "Live Coding" chip when the setting is armed (indicator is
+    // important because the feature silently samples the screen during meetings).
+    const [liveCodingModeEnabled, setLiveCodingModeEnabled] = useState(false);
     const [isMeetingActive, setIsMeetingActive] = useState(false);
     const [selectedMeeting, setSelectedMeeting] = useState<Meeting | null>(null);
     const [upcomingEvents, setUpcomingEvents] = useState<any[]>([]);
     const [isPrepared, setIsPrepared] = useState(false);
     const [preparedEvent, setPreparedEvent] = useState<any>(null);
-    const [isCalendarConnected, setIsCalendarConnected] = useState(false);
     const [isRefreshing, setIsRefreshing] = useState(false);
     const [showNotification, setShowNotification] = useState(false);
 
     // Global search state (for AI chat overlay)
     const [isGlobalChatOpen, setIsGlobalChatOpen] = useState(false);
     const [submittedGlobalQuery, setSubmittedGlobalQuery] = useState('');
+
+    // sensi M1 Step 4 — header pill state for the active provider+model.
+    // Hydrated from llm:get-active-provider-and-model on mount and kept in
+    // sync with other windows via the onLlmActiveChanged broadcast. Click
+    // the pill to open the existing ModelSelectorWindow, which now uses the
+    // grouped multi-provider layout.
+    const [activeProvider, setActiveProvider] = useState<import('@providers/types').ProviderId | null>(null);
+    const [activeModel, setActiveModel] = useState<string | null>(null);
+    const [activePairLoaded, setActivePairLoaded] = useState<boolean>(false);
+
+    useEffect(() => {
+        let cancelled = false;
+        window.electronAPI?.getActiveProviderAndModel?.().then((pair) => {
+            if (cancelled || !pair) return;
+            setActiveProvider(pair.provider);
+            setActiveModel(pair.model);
+            setActivePairLoaded(true);
+        }).catch(() => {
+            if (!cancelled) setActivePairLoaded(true);
+        });
+        const off = window.electronAPI?.onLlmActiveChanged?.((payload) => {
+            setActiveProvider(payload.provider);
+            setActiveModel(payload.model);
+            setActivePairLoaded(true);
+        });
+        return () => {
+            cancelled = true;
+            off?.();
+        };
+    }, []);
+
+    // Pill label helper — same logic as SensiInterface header pill, kept
+    // local because the two components have different overlay styling.
+    const formatPillLabel = (): string => {
+        if (!activePairLoaded) return 'Loading…';
+        if (!activeProvider && !activeModel) return 'No provider';
+        const labels: Record<string, string> = {
+            minimax: 'MiniMax', gemini: 'Gemini', claude: 'Claude',
+            openai: 'OpenAI', groq: 'Groq', ollama: 'Ollama',
+        };
+        const m = activeModel || '';
+        let modelLabel = m;
+        if (m.startsWith('ollama-')) modelLabel = m.replace('ollama-', '');
+        else if (m.startsWith('MiniMax-')) modelLabel = m.replace('MiniMax-', 'M').replace('-highspeed', ' fast');
+        else if (m === 'gemini-3.1-flash-lite-preview') modelLabel = '3.1 Flash';
+        else if (m === 'gemini-3.1-pro-preview') modelLabel = '3.1 Pro';
+        else if (m === 'llama-3.3-70b-versatile') modelLabel = 'Llama 3.3';
+        else if (m === 'gpt-5.4') modelLabel = 'GPT 5.4';
+        else if (m === 'claude-sonnet-4-6') modelLabel = 'Sonnet 4.6';
+        const providerLabel = activeProvider ? labels[activeProvider] : '';
+        return providerLabel ? `${providerLabel} · ${modelLabel}` : modelLabel;
+    };
+
+    const handleOpenModelSelector = (e: React.MouseEvent<HTMLButtonElement>) => {
+        const rect = e.currentTarget.getBoundingClientRect();
+        // Anchor the dropdown directly below the pill button.
+        const x = window.screenX + Math.round(rect.left);
+        const y = window.screenY + Math.round(rect.bottom + 8);
+        window.electronAPI?.toggleModelSelector?.({ x, y });
+    };
 
     const fetchMeetings = () => {
         if (window.electronAPI && window.electronAPI.getRecentMeetings) {
@@ -106,7 +167,6 @@ const Launcher: React.FC<LauncherProps> = ({ onStartMeeting, onOpenSettings, onP
 
     const handleRefresh = async () => {
         setIsRefreshing(true);
-        analytics.trackCommandExecuted('refresh_calendar');
         try {
             if (window.electronAPI && window.electronAPI.calendarRefresh) {
                 setShowNotification(true);
@@ -145,6 +205,21 @@ const Launcher: React.FC<LauncherProps> = ({ onStartMeeting, onOpenSettings, onP
                 if (mounted) setIsDetectable(!undetectable);
             });
         }
+
+        // v2.6.1: initial Live Coding mode state. No change event broadcast yet
+        // (Settings writes directly to this process's store), so re-read when the
+        // launcher regains focus.
+        if (window.electronAPI?.getLiveCodingModeEnabled) {
+            window.electronAPI.getLiveCodingModeEnabled().then((enabled) => {
+                if (mounted) setLiveCodingModeEnabled(!!enabled);
+            }).catch(() => { });
+        }
+        const syncLiveCoding = () => {
+            window.electronAPI?.getLiveCodingModeEnabled?.().then((enabled) => {
+                if (mounted) setLiveCodingModeEnabled(!!enabled);
+            }).catch(() => { });
+        };
+        window.addEventListener('focus', syncLiveCoding);
 
         // Listen for undetectable changes
         let removeUndetectableListener: (() => void) | undefined;
@@ -186,6 +261,7 @@ const Launcher: React.FC<LauncherProps> = ({ onStartMeeting, onOpenSettings, onP
             if (removeMeetingsListener) removeMeetingsListener();
             if (removeUndetectableListener) removeUndetectableListener();
             if (removeMeetingStateListener) removeMeetingStateListener();
+            window.removeEventListener('focus', syncLiveCoding);
             clearInterval(interval);
         };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -230,7 +306,6 @@ const Launcher: React.FC<LauncherProps> = ({ onStartMeeting, onOpenSettings, onP
 
     const handleStartPreparedMeeting = async () => {
         if (!preparedEvent) return;
-        analytics.trackCommandExecuted('start_prepared_meeting');
         try {
             const inputDeviceId = localStorage.getItem('preferredInputDeviceId');
             const outputDeviceId = localStorage.getItem('preferredOutputDeviceId');
@@ -255,7 +330,6 @@ const Launcher: React.FC<LauncherProps> = ({ onStartMeeting, onOpenSettings, onP
         const newState = !isDetectable;
         setIsDetectable(newState);
         window.electronAPI?.setUndetectable(!newState); // Note: setUndetectable takes the *undetectable* state, which is inverse of *detectable*
-        analytics.trackModeSelected(newState ? 'launcher' : 'undetectable'); // If visible (detectable), mode is normal/launcher. If not detectable, mode is undetectable.
     };
 
     // Group meetings
@@ -304,7 +378,6 @@ const Launcher: React.FC<LauncherProps> = ({ onStartMeeting, onOpenSettings, onP
     const handleOpenMeeting = async (meeting: Meeting) => {
         setForwardMeeting(null); // Clear forward history on new navigation
         console.log("[Launcher] Opening meeting:", meeting.id);
-        analytics.trackCommandExecuted('open_meeting_details');
 
         // Fetch full meeting details including transcript and usage
         if (window.electronAPI && window.electronAPI.getMeetingDetails) {
@@ -404,14 +477,12 @@ const Launcher: React.FC<LauncherProps> = ({ onStartMeeting, onOpenSettings, onP
                 <TopSearchPill
                     meetings={meetings}
                     onAIQuery={(query) => {
-                        analytics.trackCommandExecuted('ai_query_search');
                         setSubmittedGlobalQuery(query);
                         setIsGlobalChatOpen(true);
                     }}
                     onLiteralSearch={(query) => {
                         // For now, also use AI query for literal search
                         // Could be enhanced to do fuzzy filtering in the UI
-                        analytics.trackCommandExecuted('literal_search');
                         setSubmittedGlobalQuery(query);
                         setIsGlobalChatOpen(true);
                     }}
@@ -419,17 +490,27 @@ const Launcher: React.FC<LauncherProps> = ({ onStartMeeting, onOpenSettings, onP
                         const meeting = meetings.find(m => m.id === meetingId);
                         if (meeting) {
                             handleOpenMeeting(meeting);
-                            analytics.trackCommandExecuted('open_meeting_from_search');
                         }
                     }}
                 />
 
                 {/* Right: Actions */}
-                <div className={`flex items-center gap-3 no-drag shrink-0 ${isMac ? 'mr-1' : ''}`}>
+                <div className={`flex items-center gap-2 no-drag shrink-0 ${isMac ? 'mr-1' : ''}`}>
+                    {/* sensi M1 Step 4: provider+model header pill. Click to open the
+                        grouped ModelSelectorWindow. State is hydrated from
+                        llm:get-active-provider-and-model and kept live via the
+                        onLlmActiveChanged broadcast (see hooks above). */}
+                    <button
+                        onClick={handleOpenModelSelector}
+                        className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full border text-[11px] font-medium transition-colors ${isLight ? 'border-black/10 text-text-secondary hover:text-text-primary hover:bg-black/[0.04]' : 'border-white/10 text-text-secondary hover:text-text-primary hover:bg-white/5'}`}
+                        title="Switch active provider + model"
+                    >
+                        <span className="truncate max-w-[160px]">{formatPillLabel()}</span>
+                        <ChevronDown size={12} className="shrink-0 opacity-70" />
+                    </button>
                     <button
                         onClick={() => {
                             onOpenSettings();
-                            // analytics.trackCommandExecuted('open_settings'); // Optional, high volume
                         }}
                         className={`p-2 text-text-secondary hover:text-text-primary transition-all duration-300 ${isLight ? 'hover:drop-shadow-[0_0_6px_rgba(0,0,0,0.25)]' : 'hover:drop-shadow-[0_0_8px_rgba(255,255,255,0.5)]'}`}
                     >
@@ -475,19 +556,24 @@ const Launcher: React.FC<LauncherProps> = ({ onStartMeeting, onOpenSettings, onP
                             {/* TOP SECTION: Grey Background (Scrolls with content) */}
                             <section className={`${isLight ? 'bg-bg-primary' : 'bg-bg-elevated'} px-8 pt-6 pb-8 border-b border-border-subtle shrink-0`}>
                                 <div className="max-w-4xl mx-auto space-y-6">
-                                    {/* 1.5. Hero Header (Title + Controls + CTA) */}
+                                    {/* 1.5. Hero Header (Title + Controls + CTA) — v2.5.0 Atelier redesign */}
                                     <div className="flex items-center justify-between">
                                         <div className="flex items-center gap-4">
-                                            <h1 className="text-3xl font-celeb-light font-medium text-text-primary tracking-wide drop-shadow-sm">My Natively</h1>
+                                            <div className="flex items-center gap-3">
+                                                <SensiMark size={28} variant="mark" className="text-[var(--accent-primary)]" />
+                                                <h1 className="text-[28px] font-celeb-light font-medium text-text-primary tracking-[0.02em] leading-none">sensi</h1>
+                                            </div>
+
+                                            <div className="w-px h-6 bg-border-subtle mx-1" />
 
                                             {/* Refresh Button */}
                                             <button
                                                 onClick={handleRefresh}
                                                 disabled={isRefreshing}
-                                                className={`p-2 text-text-secondary hover:text-text-primary rounded-full transition-colors ${isRefreshing ? 'animate-spin text-blue-400' : ''} ${isLight ? 'hover:bg-black/8' : 'hover:bg-white/10'}`}
+                                                className={`p-2 text-text-tertiary hover:text-text-primary rounded-md transition-colors ${isRefreshing ? 'animate-spin text-[var(--accent-primary)]' : ''} ${isLight ? 'hover:bg-black/[0.04]' : 'hover:bg-white/[0.05]'}`}
                                                 title="Refresh State"
                                             >
-                                                <RefreshCw size={18} />
+                                                <RefreshCw size={15} />
                                             </button>
 
                                             {/* Detectable Toggle Pill */}
@@ -525,6 +611,21 @@ const Launcher: React.FC<LauncherProps> = ({ onStartMeeting, onOpenSettings, onP
                                                     <div className={`absolute top-0.5 w-3 h-3 rounded-full bg-white shadow-sm transition-all ${!isDetectable ? 'left-[18px]' : 'left-0.5'}`} />
                                                 </div>
                                             </div>
+
+                                            {/* v2.6.1 Live Coding status chip. Visible whenever the Setting
+                                                is armed so the user knows sensi will sample their screen once a
+                                                meeting starts. In-meeting the overlay shows its own pulsing LIVE
+                                                pill; this chip is the pre-meeting mirror. */}
+                                            {liveCodingModeEnabled && (
+                                                <button
+                                                    onClick={() => onOpenSettings('general')}
+                                                    title="Live Coding mode is armed. Click to change."
+                                                    className={`flex items-center gap-1.5 border rounded-full px-3 py-1.5 transition-colors ${isLight ? 'bg-bg-elevated border-[var(--accent-primary)]/30 hover:bg-bg-item-surface' : 'bg-[var(--accent-primary)]/[0.08] border-[var(--accent-primary)]/25 hover:bg-[var(--accent-primary)]/[0.12]'}`}
+                                                >
+                                                    <Eye size={13} className="text-[var(--accent-primary)]" />
+                                                    <span className="text-[10.5px] font-bold uppercase tracking-[0.14em] text-[var(--accent-primary)]">Live Coding</span>
+                                                </button>
+                                            )}
                                         </div>
 
                                         {/* Center: Ollama Pull Status Pill (flex-1 to center evenly) */}
@@ -539,7 +640,7 @@ const Launcher: React.FC<LauncherProps> = ({ onStartMeeting, onOpenSettings, onP
                                                         className={`flex items-center gap-2 px-4 py-2 rounded-full backdrop-blur-xl ${isLight ? 'bg-bg-elevated border border-border-muted shadow-[0_4px_16px_rgba(0,0,0,0.1)]' : 'bg-bg-elevated/80 border border-white/10 shadow-[0_4px_16px_rgba(0,0,0,0.3)]'}`}
                                                     >
                                                         {ollamaPullStatus === 'downloading' ? (
-                                                            <DownloadCloud size={14} className="text-blue-400 animate-pulse shrink-0" />
+                                                            <DownloadCloud size={14} className="text-[var(--accent-primary)] animate-pulse shrink-0" />
                                                         ) : ollamaPullStatus === 'complete' ? (
                                                             <CheckCircle size={14} className="text-emerald-400 shrink-0" />
                                                         ) : (
@@ -552,7 +653,7 @@ const Launcher: React.FC<LauncherProps> = ({ onStartMeeting, onOpenSettings, onP
                                                             {ollamaPullStatus === 'downloading' && (
                                                                 <div className="w-full h-[3px] bg-white/10 rounded-full mt-1 overflow-hidden">
                                                                     <div
-                                                                        className="h-full bg-blue-500 rounded-full transition-all duration-300"
+                                                                        className="h-full bg-[var(--accent-primary)] rounded-full transition-all duration-300"
                                                                         style={{ width: `${ollamaPullPercent}%` }}
                                                                     />
                                                                 </div>
@@ -568,15 +669,13 @@ const Launcher: React.FC<LauncherProps> = ({ onStartMeeting, onOpenSettings, onP
                                             onClick={() => {
                                                 if (isMeetingActive) {
                                                     // inactive=true: overlay appears on top but doesn't activate
-                                                    // the Natively app or steal OS focus — preserves stealth.
+                                                    // the sensi app or steal OS focus — preserves stealth.
                                                     // setWindowMode (not showWindow) is required because
                                                     // logo-click set currentWindowMode='launcher', so showWindow()
                                                     // would re-show the launcher rather than switch to overlay.
                                                     window.electronAPI?.setWindowMode?.('overlay', true);
-                                                    analytics.trackCommandExecuted('resume_meeting_from_launcher');
                                                 } else {
                                                     onStartMeeting();
-                                                    analytics.trackCommandExecuted('start_natively_cta');
                                                 }
                                             }}
                                             whileHover={{ scale: 1.01, filter: 'brightness(1.1)' }}
@@ -634,8 +733,9 @@ const Launcher: React.FC<LauncherProps> = ({ onStartMeeting, onOpenSettings, onP
                                                             transition={{ duration: 0.22, ease: 'easeOut' }}
                                                             className="flex items-center gap-3"
                                                         >
-                                                            <img src={icon} alt="Logo" className="w-[18px] h-[18px] object-contain brightness-0 invert drop-shadow-[0_1px_2px_rgba(0,0,0,0.1)] opacity-90" />
-                                                            <span className="drop-shadow-[0_1px_1px_rgba(0,0,0,0.1)] text-[20px] leading-none">Start Natively</span>
+                                                            {/* POLISH-01a: SVG mark replaces raster icon.png's upstream "N" glyph */}
+                                                            <SensiMark variant="mark" size={18} className="text-white drop-shadow-[0_1px_2px_rgba(0,0,0,0.1)] opacity-90" />
+                                                            <span className="drop-shadow-[0_1px_1px_rgba(0,0,0,0.1)] text-[20px] leading-none">Start sensi</span>
                                                         </motion.div>
                                                     )}
                                                 </AnimatePresence>
@@ -687,90 +787,77 @@ const Launcher: React.FC<LauncherProps> = ({ onStartMeeting, onOpenSettings, onP
                                         ) : (
                                             /* Dynamic Next Meeting OR Default Intro */
                                             nextMeeting ? (
-                                                <div className={`md:col-span-2 relative group rounded-xl overflow-hidden ${isLight ? 'bg-bg-elevated' : 'bg-bg-secondary'} flex flex-col shadow-[0_1px_3px_rgba(0,0,0,0.07),0_1px_2px_rgba(0,0,0,0.04)]`}>
+                                                <div className={`md:col-span-2 relative group rounded-xl overflow-hidden flex flex-col transition-all duration-300 ${isLight ? 'bg-bg-elevated border border-border-subtle shadow-[0_1px_3px_rgba(0,0,0,0.05),0_8px_24px_rgba(184,145,92,0.06)] hover:shadow-[0_1px_3px_rgba(0,0,0,0.05),0_12px_32px_rgba(184,145,92,0.10)]' : 'bg-bg-elevated border border-border-subtle shadow-[0_20px_40px_-12px_rgba(0,0,0,0.4),0_0_0_1px_rgba(184,145,92,0.04)] hover:shadow-[0_20px_40px_-12px_rgba(0,0,0,0.4),0_0_0_1px_rgba(184,145,92,0.12)]'}`}>
+                                                    {/* Brushstroke accent at top — echoes the SensiMark glyph */}
+                                                    <div className="absolute top-0 left-0 right-0 h-[2px] bg-gradient-to-r from-transparent via-[var(--accent-primary)] to-transparent opacity-60" />
+
                                                     {/* Header */}
                                                     <div className="p-5 flex-1 relative z-10">
-                                                        <div className="flex items-center gap-2 mb-2">
-                                                            <div className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-                                                            <span className="text-[11px] font-bold text-emerald-400 uppercase tracking-wider">Up Next</span>
-                                                            <span className="text-[11px] text-text-tertiary">• Starts in {Math.max(0, Math.ceil((new Date(nextMeeting.startTime).getTime() - Date.now()) / 60000))} min</span>
+                                                        <div className="flex items-center gap-2 mb-2.5">
+                                                            <div className="relative flex items-center justify-center w-2 h-2">
+                                                                <div className="absolute inset-0 rounded-full bg-[var(--accent-primary)] opacity-30 animate-ping" />
+                                                                <div className="relative w-1.5 h-1.5 rounded-full bg-[var(--accent-primary)] shadow-[0_0_6px_rgba(184,145,92,0.8)]" />
+                                                            </div>
+                                                            <span className="text-[10.5px] font-bold text-[var(--accent-primary)] uppercase tracking-[0.18em]">Up Next</span>
+                                                            <span className="text-[11px] text-text-tertiary font-medium">
+                                                                Starts in {Math.max(0, Math.ceil((new Date(nextMeeting.startTime).getTime() - Date.now()) / 60000))} min
+                                                            </span>
                                                         </div>
 
-                                                        <h2 className="text-xl font-bold text-text-primary leading-tight mb-1 line-clamp-2">
+                                                        <h2 className="text-[20px] font-celeb-light font-medium text-text-primary leading-[1.2] tracking-[-0.01em] mb-2.5 line-clamp-2">
                                                             {nextMeeting.title}
                                                         </h2>
 
-                                                        <div className="flex items-center gap-2 text-text-secondary text-xs mt-2">
-                                                            <Calendar size={12} />
-                                                            <span>{new Date(nextMeeting.startTime).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })} - {new Date(nextMeeting.endTime).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</span>
+                                                        <div className="flex items-center gap-2 text-text-secondary text-[11.5px] mt-2">
+                                                            <Calendar size={11} className="opacity-70" />
+                                                            <span className="tabular-nums">
+                                                                {new Date(nextMeeting.startTime).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })} — {new Date(nextMeeting.endTime).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}
+                                                            </span>
                                                             {nextMeeting.link && (
                                                                 <>
-                                                                    <span className="opacity-20">|</span>
-                                                                    <LinkIcon size={12} />
-                                                                    <span className="truncate max-w-[150px]">Meeting Link Found</span>
+                                                                    <span className="opacity-20">·</span>
+                                                                    <LinkIcon size={11} className="text-[var(--accent-primary)] opacity-80" />
+                                                                    <span className="text-[var(--accent-primary)] opacity-90">Link ready</span>
                                                                 </>
                                                             )}
                                                         </div>
                                                     </div>
 
                                                     {/* Actions */}
-                                                    <div className="p-4 bg-bg-elevated/50 border-t border-border-subtle flex items-center gap-3">
+                                                    <div className={`px-4 py-3 border-t border-border-subtle flex items-center gap-2 ${isLight ? 'bg-bg-elevated/60' : 'bg-black/20'}`}>
                                                         <button
                                                             onClick={() => handlePrepare(nextMeeting)}
-                                                            className={`flex-1 border px-4 py-2 rounded-lg text-xs font-medium transition-all flex items-center justify-center gap-2 ${isLight ? 'bg-bg-item-surface hover:bg-bg-item-active border-border-muted text-text-primary' : 'bg-white/10 hover:bg-white/20 border-white/10 text-white'}`}
+                                                            className="flex-1 px-4 py-2 rounded-md text-[12px] font-semibold transition-all flex items-center justify-center gap-2 active:scale-[0.98] bg-[var(--accent-primary)] text-[#16151A] hover:brightness-110 shadow-[0_2px_8px_-2px_rgba(184,145,92,0.4)]"
                                                         >
-                                                            <Zap size={13} className="text-yellow-400" />
+                                                            <Zap size={13} />
                                                             Prepare
                                                         </button>
                                                         <button
                                                             onClick={onStartMeeting}
-                                                            className={`px-4 py-2 rounded-lg text-xs font-medium text-text-secondary hover:text-text-primary transition-all ${isLight ? 'hover:bg-bg-item-surface' : 'hover:bg-white/5'}`}
+                                                            className={`px-4 py-2 rounded-md text-[12px] font-medium transition-all active:scale-[0.98] ${isLight ? 'text-text-secondary hover:text-text-primary hover:bg-bg-item-surface' : 'text-text-secondary hover:text-text-primary hover:bg-white/[0.04]'}`}
                                                         >
                                                             Start now
                                                         </button>
                                                     </div>
 
-                                                    {/* Background Decoration */}
-                                                    <div className="absolute top-0 right-0 w-[150px] h-[150px] bg-emerald-500/10 blur-[60px] pointer-events-none" />
+                                                    {/* Warm brass glow (replaces cool green) */}
+                                                    <div className="absolute top-0 right-0 w-[180px] h-[180px] bg-[var(--accent-primary)] opacity-[0.08] blur-[70px] pointer-events-none" />
+                                                    <div className="absolute bottom-0 left-0 w-[120px] h-[120px] bg-[var(--accent-primary)] opacity-[0.04] blur-[60px] pointer-events-none" />
                                                 </div>
                                             ) : (
                                                 <div className="md:col-span-2 h-full">
-                                                    <FeatureSpotlight />
+                                                    <UpcomingMeetingsPanel
+                                                        events={upcomingEvents}
+                                                        onPrepare={handlePrepare}
+                                                        onRefresh={handleRefresh}
+                                                        isRefreshing={isRefreshing}
+                                                    />
                                                 </div>
                                             )
                                         )}
 
 
 
-                                        {/* Right Secondary Card */}
-                                        <div className="md:col-span-1 rounded-xl overflow-hidden bg-bg-elevated relative group flex flex-col items-center pt-6 text-center">
-                                            {/* Backdrop Image */}
-                                            <div className="absolute inset-0">
-                                                <img src={calender} alt="" className="w-full h-full object-cover opacity-100 transition-opacity duration-500 translate-x--1 translate-y-[1px] scale-105" />
-                                            </div>
-
-                                            {/* Content Layer */}
-                                            <div className="relative z-10 w-full flex flex-col items-center h-full">
-                                                <h3 className="text-[19px] leading-tight mb-4">
-                                                    {isCalendarConnected ? (
-                                                        <>
-                                                            <span className="block font-semibold text-white">Calendar linked</span>
-                                                            <span className="block font-medium text-white/60 text-[0.95em]">Events synced</span>
-                                                        </>
-                                                    ) : (
-                                                        <>
-                                                            <span className="block font-semibold text-white">Link your calendar to</span>
-                                                            <span className="block font-medium text-white/60 text-[0.95em]">see upcoming events</span>
-                                                        </>
-                                                    )}
-                                                </h3>
-
-                                                <ConnectCalendarButton
-                                                    className="-translate-x-0.5"
-                                                    onConnect={() => setIsCalendarConnected(true)}
-                                                />
-                                            </div>
-                                        </div>
                                     </div>
                                 </div>
                             </section>
@@ -783,34 +870,34 @@ const Launcher: React.FC<LauncherProps> = ({ onStartMeeting, onOpenSettings, onP
                                         {/* Iterating Date Groups */}
                                         {sortedGroups.map((label) => (
                                             <section key={label}>
-                                                <h3 className="text-[13px] font-medium text-text-secondary mb-3 pl-1">{label}</h3>
-                                                <div className="space-y-1">
+                                                <h3 className="text-[10.5px] font-bold text-text-tertiary uppercase tracking-[0.14em] mb-3 pl-1">{label}</h3>
+                                                <div className="space-y-0.5">
                                                     {groupedMeetings[label].map((m) => (
                                                         <motion.div
                                                             key={m.id}
                                                             layoutId={`meeting-${m.id}`}
-                                                            className="group relative flex items-center justify-between px-3 py-2 rounded-lg bg-transparent hover:bg-bg-elevated transition-colors"
+                                                            className={`group relative flex items-center justify-between px-3.5 py-2.5 rounded-lg bg-transparent border border-transparent transition-all duration-150 cursor-pointer ${isLight ? 'hover:bg-bg-elevated hover:border-border-muted hover:shadow-[0_1px_2px_rgba(0,0,0,0.04)]' : 'hover:bg-white/[0.03] hover:border-white/5'}`}
                                                             onClick={() => handleOpenMeeting(m)}
                                                         >
-                                                            <div className={`font-medium text-[14px] max-w-[60%] truncate ${m.title === 'Processing...' ? 'text-blue-400 italic animate-pulse' : 'text-text-primary'}`}>
+                                                            <div className={`font-medium text-[14px] leading-tight max-w-[60%] truncate tracking-[-0.005em] ${m.title === 'Processing...' ? 'text-[var(--accent-primary)] italic animate-pulse' : 'text-text-primary'}`}>
                                                                 {m.title}
                                                             </div>
 
                                                             {/* Time & Duration Section */}
-                                                            <div className="flex items-center gap-4">
+                                                            <div className="flex items-center gap-3">
                                                                 {m.title === 'Processing...' ? (
                                                                     <div className="flex items-center gap-2 transition-all duration-200 ease-out group-hover:opacity-0 group-hover:translate-x-2 delayed-hover-exit">
-                                                                        <RefreshCw size={12} className="animate-spin text-blue-500" />
-                                                                        <span className="text-xs text-blue-500 font-medium">Finalizing...</span>
+                                                                        <RefreshCw size={12} className="animate-spin text-[var(--accent-primary)]" />
+                                                                        <span className="text-xs text-[var(--accent-primary)] font-medium">Finalizing...</span>
                                                                     </div>
                                                                 ) : (
                                                                     <>
-                                                                        <span className="relative z-10 bg-bg-elevated text-text-secondary text-[9px] px-1.5 py-0.5 rounded-full font-medium min-w-[35px] text-center tracking-wide">
+                                                                        <span className={`relative z-10 text-text-tertiary text-[10px] px-2 py-0.5 rounded-full font-semibold min-w-[38px] text-center tracking-wider border ${isLight ? 'bg-bg-elevated border-border-muted' : 'bg-white/[0.04] border-white/5'}`}>
                                                                             {formatDurationPill(m.duration)}
                                                                         </span>
 
-                                                                        {/* Time Text (Should fade out on hover) */}
-                                                                        <span className="text-[13px] text-text-secondary font-medium min-w-[60px] text-right transition-all duration-200 ease-out group-hover:opacity-0 group-hover:translate-x-2 delayed-hover-exit">
+                                                                        {/* Time Text (fades on hover so the kebab can slide in) */}
+                                                                        <span className="text-[12.5px] text-text-tertiary font-medium min-w-[64px] text-right tabular-nums transition-all duration-200 ease-out group-hover:opacity-0 group-hover:translate-x-2 delayed-hover-exit">
                                                                             {formatTime(m.date)}
                                                                         </span>
                                                                     </>
@@ -850,7 +937,6 @@ const Launcher: React.FC<LauncherProps> = ({ onStartMeeting, onOpenSettings, onP
                                                                                 className={`w-full flex items-center gap-2 px-3 py-1.5 text-[12px] text-text-primary rounded-lg transition-colors text-left ${isLight ? 'hover:bg-bg-item-surface' : 'hover:bg-white/10'}`}
                                                                                 onClick={async () => {
                                                                                     setActiveMenuId(null);
-                                                                                    analytics.trackPdfExported();
                                                                                     // Fetch full details if needed
                                                                                     if (window.electronAPI && window.electronAPI.getMeetingDetails) {
                                                                                         try {
@@ -899,7 +985,17 @@ const Launcher: React.FC<LauncherProps> = ({ onStartMeeting, onOpenSettings, onP
                                         ))}
 
                                         {meetings.length === 0 && (
-                                            <div className="p-4 text-text-tertiary text-sm">No recent meetings.</div>
+                                            <div className="flex flex-col items-center justify-center py-14 gap-3 text-center">
+                                                <div className={`w-12 h-12 rounded-full flex items-center justify-center ${isLight ? 'bg-bg-elevated border border-border-muted' : 'bg-white/[0.03] border border-white/5'}`}>
+                                                    <Calendar size={20} className="text-text-tertiary" />
+                                                </div>
+                                                <div>
+                                                    <h3 className="text-[14px] font-semibold text-text-primary">No meetings yet</h3>
+                                                    <p className="text-[12px] text-text-secondary mt-1 max-w-[320px]">
+                                                        Start a meeting and sensi will capture the transcript, summary, and anything you asked it to answer.
+                                                    </p>
+                                                </div>
+                                            </div>
                                         )}
 
                                     </div>
@@ -924,8 +1020,8 @@ const Launcher: React.FC<LauncherProps> = ({ onStartMeeting, onOpenSettings, onP
                     >
                         {/* Liquid Icon Orb */}
                         <div className="relative flex items-center justify-center w-9 h-9 rounded-full bg-gradient-to-b from-blue-400/20 to-blue-600/20 shadow-[inset_0_1px_0_rgba(255,255,255,0.2)] border border-white/5">
-                            <div className="absolute inset-0 rounded-full bg-blue-500/20 blur-md" />
-                            <RefreshCw size={15} className="text-blue-300 animate-[spin_2s_linear_infinite] drop-shadow-[0_0_5px_rgba(59,130,246,0.6)]" />
+                            <div className="absolute inset-0 rounded-full bg-[var(--accent-primary)]/20 blur-md" />
+                            <RefreshCw size={15} className="text-[var(--accent-primary)] animate-[spin_2s_linear_infinite] drop-shadow-[0_0_5px_rgba(184,145,92,0.6)]" />
                         </div>
 
                         {/* Text Content */}
