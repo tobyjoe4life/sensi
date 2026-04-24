@@ -342,16 +342,6 @@ interface ElectronAPI {
     error?: string;
   }>;
 
-  // sensi M7 / MOTION-01: Video / GIF frame capture
-  motionStart: () => Promise<{ ok: boolean; maxFrames?: number; intervalMs?: number; error?: string }>;
-  motionStop: () => Promise<{ ok: boolean; frames?: string[]; durationMs?: number; error?: string }>;
-  motionStatus: () => Promise<{ recording: boolean; frameCount: number; elapsedMs: number; maxFrames: number; intervalMs: number }>;
-  motionSummarize: (framePaths: string[]) => Promise<{ success: boolean; brief?: string; frameCount?: number; error?: string }>;
-  motionCompare: (clipA: string[], clipB: string[]) => Promise<{ success: boolean; brief?: string; clipAFrames?: number; clipBFrames?: number; error?: string }>;
-  motionDiscard: (framePaths: string[]) => Promise<{ success: boolean; error?: string }>;
-  onMotionFrameCaptured: (callback: (data: { frameCount: number }) => void) => () => void;
-  onMotionAutoStopped: (callback: () => void) => () => void;
-
   // Overlay Opacity (Stealth Mode)
   setOverlayOpacity: (opacity: number) => Promise<void>;
   onOverlayOpacityChanged: (callback: (opacity: number) => void) => () => void;
@@ -1282,24 +1272,6 @@ contextBridge.exposeInMainWorld("electronAPI", {
     const sub = (_: unknown, status: { connected: boolean; email?: string }) => callback(status);
     ipcRenderer.on('calendar-connection-changed', sub);
     return () => ipcRenderer.removeListener('calendar-connection-changed', sub);
-  },
-
-  // sensi M7 / MOTION-01: Video / GIF frame capture + analysis
-  motionStart: () => ipcRenderer.invoke('motion:start'),
-  motionStop: () => ipcRenderer.invoke('motion:stop'),
-  motionStatus: () => ipcRenderer.invoke('motion:status'),
-  motionSummarize: (framePaths: string[]) => ipcRenderer.invoke('motion:summarize', framePaths),
-  motionCompare: (clipA: string[], clipB: string[]) => ipcRenderer.invoke('motion:compare', clipA, clipB),
-  motionDiscard: (framePaths: string[]) => ipcRenderer.invoke('motion:discard', framePaths),
-  onMotionFrameCaptured: (callback: (data: { frameCount: number }) => void) => {
-    const sub = (_: any, data: { frameCount: number }) => callback(data);
-    ipcRenderer.on('motion-frame-captured', sub);
-    return () => ipcRenderer.removeListener('motion-frame-captured', sub);
-  },
-  onMotionAutoStopped: (callback: () => void) => {
-    const sub = () => callback();
-    ipcRenderer.on('motion-auto-stopped', sub);
-    return () => ipcRenderer.removeListener('motion-auto-stopped', sub);
   },
 
   // Dynamic Model Discovery

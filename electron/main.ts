@@ -3091,24 +3091,6 @@ async function initializeApp() {
       console.error('[Main] Failed to initialize MeetingDetector:', err);
     }
 
-    // sensi M7 / MOTION-01 (v2.8.0): Motion Capture Manager — user-driven
-    // video/GIF frame capture for assessment summarization and clip
-    // comparison. Same screenshot path as Live Coding; separate frame list.
-    try {
-      const { MotionCaptureManager } = require('./services/MotionCaptureManager') as typeof import('./services/MotionCaptureManager');
-      const mcm = MotionCaptureManager.getInstance();
-      mcm.bindCaptureFn(() => appState.getScreenshotHelper().takeLiveFrame());
-      mcm.on('captured', (payload: { index: number }) => {
-        appState.broadcast('motion-frame-captured', { frameCount: payload.index + 1 });
-      });
-      mcm.on('auto-stopped', () => {
-        appState.broadcast('motion-auto-stopped', {});
-      });
-      console.log('[Main] MotionCaptureManager initialized');
-    } catch (err) {
-      console.error('[Main] Failed to initialize MotionCaptureManager:', err);
-    }
-
     // sensi M7 / PERSONA-01 (v2.10.0): PersonaManager — owns user_persona
     // table and extraction pipeline. Binds to the live DB handle + a
     // function that resolves the active LLMHelper so the persona's
