@@ -12,17 +12,6 @@ import UpdateBanner from "./components/UpdateBanner"
 import { PermissionsToaster }   from "./components/onboarding/PermissionsToaster"
 import { AlertCircle } from "lucide-react"
 import { clampOverlayOpacity, OVERLAY_OPACITY_DEFAULT, getDefaultOverlayOpacity } from "./lib/overlayAppearance"
-import { PERSONAL_USE } from "./lib/config"
-import {
-  JDAwarenessToaster,
-  ProfileFeatureToaster,
-  PremiumPromoToaster,
-  RemoteCampaignToaster,
-  PremiumUpgradeModal,
-  NativelyApiPromoToaster,
-  MaxUltraUpgradeToaster,
-  useAdCampaigns
-} from './premium'
 import { ErrorBoundary } from "./components/ErrorBoundary"
 import { SignInGate } from "./components/SignInGate"
 
@@ -51,9 +40,6 @@ const App: React.FC = () => {
   const [showStartup, setShowStartup] = useState(true);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [settingsInitialTab, setSettingsInitialTab] = useState('general');
-  const [showPremiumModal, setShowPremiumModal] = useState(false);
-  const [isPremiumActive, setIsPremiumActive] = useState(false);
-  const [planDetails, setPlanDetails] = useState<{ isPremium: boolean; plan?: string; provider?: string }>({ isPremium: false });
 
   // Overlay opacity — only meaningful when isOverlayWindow, but stored centrally
   // so it can be initialized once from localStorage and updated via IPC.
@@ -64,16 +50,9 @@ const App: React.FC = () => {
     const isUserSet = Number.isFinite(parsed) && parsed !== OVERLAY_OPACITY_DEFAULT;
     return isUserSet ? clampOverlayOpacity(parsed) : getDefaultOverlayOpacity();
   });
-  
-  // Profile state for ad targeting
-  const [hasProfile, setHasProfile] = useState(false);
+
   const [isLauncherMainView, setIsLauncherMainView] = useState(true);
 
-  // Initialize Ads Campaign Manager
-  const [appStartTime] = useState<number>(Date.now());
-  const [lastMeetingEndTime, setLastMeetingEndTime] = useState<number | null>(null);
-  const [isProcessingMeeting, setIsProcessingMeeting] = useState<boolean>(false);
-  
   // Ollama Auto-Pull State
   const [ollamaPullStatus, setOllamaPullStatus] = useState<'idle' | 'downloading' | 'complete' | 'failed'>('idle');
   const [ollamaPullPercent, setOllamaPullPercent] = useState<number>(0);
@@ -81,79 +60,13 @@ const App: React.FC = () => {
 
   // Re-index State
   const [incompatibleWarning, setIncompatibleWarning] = useState<{count: number; oldProvider: string; newProvider: string} | null>(null);
-  
-  // API check
-  const [hasNativelyApi, setHasNativelyApi] = useState<boolean>(false);
 
   // ── Onboarding toaster ────────────────────────────────────
   const [showPermissionsToaster, setShowPermissionsToaster] = useState(false);
 
-  const isAppReady = !isSettingsWindow && !isOverlayWindow && !isModelSelectorWindow && !showStartup && !isSettingsOpen && isLauncherMainView;
-  const { activeAd, dismissAd, previewAd } = useAdCampaigns(
-    planDetails,
-    hasProfile,
-    isAppReady,
-    appStartTime,
-    lastMeetingEndTime,
-    isProcessingMeeting,
-    hasNativelyApi
-  );
-
-  // Preview shortcuts — Ctrl/Cmd+Shift+1-5 force-show any ad card.
-  // Uses e.code so Shift doesn't remap the digit to a symbol ('!' etc.).
-  useEffect(() => {
-    const CODE_MAP: Record<string, string> = {
-      'Digit1': 'max_ultra_upgrade',
-      'Digit2': 'promo',
-      'Digit3': 'natively_api',
-      'Digit4': 'profile',
-      'Digit5': 'jd',
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (!(e.metaKey || e.ctrlKey) || !e.shiftKey) return;
-      const ad = CODE_MAP[e.code];
-      if (!ad) return;
-      e.preventDefault();
-      previewAd(ad as any);
-    };
-    document.addEventListener('keydown', onKey);
-    return () => document.removeEventListener('keydown', onKey);
-  }, [previewAd]);
-
   useEffect(() => {
     // Clean up old local storage
     localStorage.removeItem('useLegacyAudioBackend');
-
-    // Basic status check for campaign targeting
-    window.electronAPI?.profileGetStatus?.().then(s => setHasProfile(s?.hasProfile || false)).catch(() => {});
-    // Load full plan details for targeted ad delivery (plan tier + provider).
-    window.electronAPI?.licenseGetDetails?.()
-      .then(details => {
-        setPlanDetails(details ?? { isPremium: false });
-        setIsPremiumActive(details?.isPremium ?? false);
-      })
-      .catch((err) => {
-        // Fallback: async premium check if licenseGetDetails is unavailable.
-        // Log the original rejection so a regression in LicenseManager is
-        // visible in dev tools rather than silently masked.
-        console.warn('[App] licenseGetDetails failed, using premium-check fallback:', err);
-        const premiumCheck = window.electronAPI?.licenseCheckPremiumAsync ?? window.electronAPI?.licenseCheckPremium;
-        premiumCheck?.().then((active: boolean) => {
-          setIsPremiumActive(active);
-          setPlanDetails({ isPremium: active });
-        }).catch((fallbackErr) => {
-          console.warn('[App] premium-check fallback also failed:', fallbackErr);
-        });
-      });
-
-    // Also check for Natively API key
-    window.electronAPI?.getStoredCredentials?.()
-      .then((creds) => setHasNativelyApi(!!creds?.hasNativelyKey))
-      .catch(() => {});
-
-    // sensi M0-T6: trial polling, onTrialEnded listener, and getTrialStatus()
-    // startup calls were removed. Personal-use mode has no natively-cloud trial
-    // and no trial UI — see DECISIONS.md D003 and src/lib/config.ts.
 
     // ── Onboarding toaster ───────────────────────────────────
     if (isLauncherWindow || isDefault) {
@@ -163,13 +76,6 @@ const App: React.FC = () => {
         setShowPermissionsToaster(true);
       }
     }
-
-    // Listen for meeting processing completion to trigger post-meeting ads
-    const removeMeetingsListener = window.electronAPI?.onMeetingsUpdated?.(() => {
-      console.log("[App.tsx] Meetings updated (processing finished), starting ad delay timer");
-      setIsProcessingMeeting(false);
-      setLastMeetingEndTime(Date.now());
-    });
 
     // Listen for Ollama Auto-Pull Progress
     let removeProgress: (() => void) | undefined;
@@ -197,7 +103,6 @@ const App: React.FC = () => {
     }
 
     return () => {
-      if (removeMeetingsListener) removeMeetingsListener();
       if (removeProgress) removeProgress();
       if (removeComplete) removeComplete();
       if (removeWarning) removeWarning();
@@ -271,7 +176,6 @@ const App: React.FC = () => {
 
   const handleEndMeeting = async () => {
     console.log("[App.tsx] handleEndMeeting triggered");
-    setIsProcessingMeeting(true);
     try {
       await window.electronAPI.endMeeting();
       console.log("[App.tsx] endMeeting IPC completed");
@@ -459,79 +363,6 @@ const App: React.FC = () => {
         }}
       />
 
-      {/* Ad toasters — render whenever activeAd is set (isLauncherMainView guard bypassed
-          when triggered via preview shortcut so the card always surfaces) */}
-      {(isLauncherMainView || !!activeAd) && !isSettingsOpen && (
-        <NativelyApiPromoToaster
-          isOpen={activeAd === 'natively_api'}
-          onDismiss={() => dismissAd('natively_api')}
-          onOpenSettings={(tab: string) => {
-            setSettingsInitialTab(tab);
-            setIsSettingsOpen(true);
-          }}
-        />
-      )}
-      {(isLauncherMainView || !!activeAd) && (
-        <>
-          <ProfileFeatureToaster
-            isOpen={activeAd === 'profile'}
-            onDismiss={dismissAd}
-            onSetupProfile={() => {
-              setSettingsInitialTab('profile');
-              setIsSettingsOpen(true);
-            }}
-          />
-          <JDAwarenessToaster
-            isOpen={activeAd === 'jd'}
-            onDismiss={dismissAd}
-            onSetupJD={() => {
-              setSettingsInitialTab('profile');
-              setIsSettingsOpen(true);
-            }}
-          />
-          <PremiumPromoToaster
-            isOpen={activeAd === 'promo'}
-            onDismiss={dismissAd}
-            onUpgrade={() => {
-              setShowPremiumModal(true);
-            }}
-          />
-          <MaxUltraUpgradeToaster
-            isOpen={activeAd === 'max_ultra_upgrade'}
-            onDismiss={dismissAd}
-            onUpgrade={() => {
-              setShowPremiumModal(true);
-            }}
-          />
-
-          {/* Remote Campaigns Render Logic */}
-          <RemoteCampaignToaster
-            isOpen={typeof activeAd === 'object' && activeAd !== null}
-            campaign={typeof activeAd === 'object' && activeAd !== null ? activeAd : undefined as any}
-            onDismiss={dismissAd}
-          />
-        </>
-      )}
-
-      <PremiumUpgradeModal
-        isOpen={showPremiumModal}
-        onClose={() => setShowPremiumModal(false)}
-        isPremium={isPremiumActive}
-        onActivated={() => {
-          setIsPremiumActive(true);
-          // Refresh full plan details after activation so ad targeting reflects the new plan
-          window.electronAPI?.licenseGetDetails?.()
-            .then(d => setPlanDetails(d ?? { isPremium: true }))
-            .catch(() => setPlanDetails({ isPremium: true }));
-          setShowPremiumModal(false);
-          // After activation, open settings to Profile Intelligence
-          setTimeout(() => {
-            setSettingsInitialTab('profile');
-            setIsSettingsOpen(true);
-          }, 300);
-        }}
-        onDeactivated={() => { setIsPremiumActive(false); setPlanDetails({ isPremium: false }); }}
-      />
     </div>
     </ErrorBoundary>
   )
