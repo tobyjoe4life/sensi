@@ -7,6 +7,25 @@ fetches from the GitHub release body, which is seeded from this file).
 
 ---
 
+## [2.17.6] — 2026-04-25
+
+Follow-up to 2.17.5's auto-answer fixes — the new "Take your time."
+fallback was firing too eagerly because Deepgram was finalizing on
+mid-sentence thinking pauses, leaving the LLM with a fragment.
+
+### Fixed
+- **Deepgram endpointing bumped 800 → 1500 ms.** Mid-sentence thinking
+  pauses ("Tell me about a time… [pause] …you led a team") no longer
+  split into two separate final segments. The first half no longer
+  reaches the auto-answer as a fragment.
+- **"Take your time." fallback narrowed.** Previously fired on any turn
+  the LLM judged "incomplete or no clear question" — too aggressive,
+  since most spoken questions lack a "?". Now restricted to turns that
+  are clearly truncated mid-word or end on a dangling conjunction
+  ("and", "but", "so", "the").
+
+---
+
 ## [2.17.5] — 2026-04-25
 
 Auto-answer behaviour fixes — was firing while the interviewer was still

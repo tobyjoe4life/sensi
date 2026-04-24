@@ -1649,7 +1649,8 @@ WHAT TO ANSWER:
 - Answer ONLY the LATEST [INTERVIEWER] turn — the one closest to the end.
 - Earlier turns are background context, not the question to address.
 - NEVER echo, repeat, or paraphrase the interviewer's words back. No "Great question, you're asking about…" — just answer.
-- If the latest [INTERVIEWER] turn is incomplete, fragmentary, or has no clear question (ends mid-thought, single trailing word, no verb), output ONLY: \`Take your time.\` — nothing else.
+- Spoken English questions usually lack question marks. Treat any [INTERVIEWER] turn that asks for information, an opinion, or an example as a question — even without "?".
+- ONLY when the latest [INTERVIEWER] turn is clearly truncated mid-word or ends on a conjunction with no object ("and", "but", "so", "because", "the", "a"), output exactly: \`Take your time.\` — nothing else.
 
 DETECT INTENT AND RESPOND:
 - Explanation: 2-4 spoken sentences, direct

@@ -213,16 +213,17 @@ export class DeepgramStreamingSTT extends EventEmitter {
             ? '&detect_language=true'
             : `&language=${this.languageCode}`;
 
-        // `endpointing=800` makes Deepgram wait ~800 ms of silence before
-        // finalizing a segment, which coalesces mid-sentence thinking
-        // pauses into one complete final rather than several fragments.
+        // v2.17.6: bumped `endpointing` 800 → 1500 ms. The 800 ms threshold
+        // was splitting natural questions on mid-sentence thinking pauses
+        // ("Tell me about a time… [800 ms thinking] …you led a team") into
+        // two separate finals, which fed the auto-answer a fragment and
+        // produced "Take your time." spam. 1500 ms keeps the segment
+        // coalesced through normal thinking pauses while still finalizing
+        // promptly when the speaker truly stops.
         //
-        // `utterance_end_ms=1200` enables Deepgram's own VAD-driven
-        // turn-end detection. It emits a separate `UtteranceEnd` event
-        // only when the speaker has actually stopped for 1.2 s — the
-        // reliable "speaker finished their turn" signal we use to fire
-        // the auto-answer. Much more accurate than our blind silence
-        // timer (v2.14.x). Requires `interim_results=true`.
+        // `utterance_end_ms=1200` is now informational only (gated in
+        // RollingTriggerPolicy v2.17.5) — the silence detector is the
+        // single source of truth for "speaker has stopped."
         const url =
             `wss://api.deepgram.com/v1/listen` +
             `?model=${model}` +
@@ -232,7 +233,7 @@ export class DeepgramStreamingSTT extends EventEmitter {
             langParam +
             `&smart_format=true` +
             `&interim_results=true` +
-            `&endpointing=800` +
+            `&endpointing=1500` +
             `&utterance_end_ms=1200` +
             `&keepalive=true`;
 
