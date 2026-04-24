@@ -234,14 +234,6 @@ interface ElectronAPI {
   setGoogleOauthCredentials: (payload: { clientId: string; clientSecret: string }) => Promise<{ success: boolean; error?: string }>
   clearGoogleOauthCredentials: () => Promise<{ success: boolean; error?: string }>
 
-  // Pre-meeting alerts
-  onPreMeetingAlert: (callback: (event: { id: string; title: string; startTime: string; endTime: string; link?: string }) => void) => () => void
-  preMeetingAcceptAlert: (event: { id: string; title: string }) => Promise<{ success: boolean; error?: string }>
-  preMeetingDismissAlert: (event: { id: string }) => Promise<{ success: boolean; error?: string }>
-  getPreMeetingAlertsEnabled: () => Promise<boolean>
-  setPreMeetingAlertsEnabled: (enabled: boolean) => Promise<{ success: boolean; error?: string }>
-  getMeetingAutoDetectEnabled: () => Promise<boolean>
-  setMeetingAutoDetectEnabled: (enabled: boolean) => Promise<{ success: boolean; error?: string }>
   getOnlineAssessmentModeEnabled: () => Promise<boolean>
   setOnlineAssessmentModeEnabled: (enabled: boolean) => Promise<{ success: boolean; error?: string }>
   onOnlineAssessmentModeChanged: (callback: (enabled: boolean) => void) => () => void
@@ -1076,20 +1068,6 @@ contextBridge.exposeInMainWorld("electronAPI", {
   setGoogleOauthCredentials: (payload: { clientId: string; clientSecret: string }) => ipcRenderer.invoke('set-google-oauth-credentials', payload),
   clearGoogleOauthCredentials: () => ipcRenderer.invoke('clear-google-oauth-credentials'),
 
-  // Pre-meeting alerts (2 min before a calendar event)
-  onPreMeetingAlert: (callback: (event: { id: string; title: string; startTime: string; endTime: string; link?: string }) => void) => {
-    const subscription = (_: any, event: any) => callback(event);
-    ipcRenderer.on('pre-meeting-alert', subscription);
-    return () => {
-      ipcRenderer.removeListener('pre-meeting-alert', subscription);
-    };
-  },
-  preMeetingAcceptAlert: (event: { id: string; title: string }) => ipcRenderer.invoke('pre-meeting-alert-accept', event),
-  preMeetingDismissAlert: (event: { id: string }) => ipcRenderer.invoke('pre-meeting-alert-dismiss', event),
-  getPreMeetingAlertsEnabled: () => ipcRenderer.invoke('get-pre-meeting-alerts-enabled'),
-  setPreMeetingAlertsEnabled: (enabled: boolean) => ipcRenderer.invoke('set-pre-meeting-alerts-enabled', enabled),
-  getMeetingAutoDetectEnabled: () => ipcRenderer.invoke('get-meeting-auto-detect-enabled'),
-  setMeetingAutoDetectEnabled: (enabled: boolean) => ipcRenderer.invoke('set-meeting-auto-detect-enabled', enabled),
   getOnlineAssessmentModeEnabled: () => ipcRenderer.invoke('get-online-assessment-mode-enabled'),
   setOnlineAssessmentModeEnabled: (enabled: boolean) => ipcRenderer.invoke('set-online-assessment-mode-enabled', enabled),
   onOnlineAssessmentModeChanged: (callback: (enabled: boolean) => void) => {

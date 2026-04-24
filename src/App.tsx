@@ -13,7 +13,6 @@ import { FreeTrialBanner }      from "./components/trial/FreeTrialBanner"
 import { FreeTrialModal }       from "./components/trial/FreeTrialModal"
 import { TrialPromoToaster }    from "./components/trial/TrialPromoToaster"
 import { PermissionsToaster }   from "./components/onboarding/PermissionsToaster"
-import { PreMeetingPrompt }     from "./components/PreMeetingPrompt"
 import { AlertCircle } from "lucide-react"
 import { clampOverlayOpacity, OVERLAY_OPACITY_DEFAULT, getDefaultOverlayOpacity } from "./lib/overlayAppearance"
 import { PERSONAL_USE } from "./lib/config"
@@ -417,8 +416,6 @@ const App: React.FC = () => {
                     initialTab={settingsInitialTab}
                     isTrialActive={!!activeTrial}
                   />
-                  {/* Pre-meeting alert modal — fires 2 min before a calendar event */}
-                  <PreMeetingPrompt />
                 </SignInGate>
                 <ToastViewport />
               </ToastProvider>

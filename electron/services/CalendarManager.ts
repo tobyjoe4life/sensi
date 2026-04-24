@@ -255,11 +255,6 @@ export class CalendarManager extends EventEmitter {
     public async refreshState(): Promise<void> {
         console.log('[CalendarManager] Refreshing state (Reality Reconciliation)...');
 
-        // 1. Reset Soft Heuristics
-        // Clear existing reminder timeouts to prevent double scheduling or stale alerts
-        this.reminderTimeouts.forEach(t => clearTimeout(t));
-        this.reminderTimeouts = [];
-
         // 2. Calendar Re-sync & Temporal Re-evaluation
         if (this.isConnected) {
             // Force fetch will also re-schedule reminders based on NEW time
@@ -369,88 +364,6 @@ export class CalendarManager extends EventEmitter {
     }
 
     // =========================================================================
-    // Reminders
-    // =========================================================================
-
-    private reminderTimeouts: NodeJS.Timeout[] = [];
-
-    private scheduleReminders(events: CalendarEvent[]) {
-        // Clear existing
-        this.reminderTimeouts.forEach(t => clearTimeout(t));
-        this.reminderTimeouts = [];
-
-        const now = Date.now();
-
-        events.forEach(event => {
-            const startStr = event.startTime;
-            if (!startStr) return;
-
-            const startTime = new Date(startStr).getTime();
-            // Reminder time: 2 minutes before
-            const reminderTime = startTime - (2 * 60 * 1000);
-
-            if (reminderTime > now) {
-                const delay = reminderTime - now;
-                // Only schedule if within next 24h (which fetch already limits)
-                if (delay < 24 * 60 * 60 * 1000) {
-                    const timeout = setTimeout(() => {
-                        this.showNotification(event);
-                    }, delay);
-                    this.reminderTimeouts.push(timeout);
-                }
-            }
-        });
-    }
-
-    // Track events the user has dismissed so a fresh poll doesn't re-alert
-    // for the same event. In-memory only — new app launch starts fresh.
-    private dismissedEventIds: Set<string> = new Set();
-
-    public dismissEvent(eventId: string): void {
-        this.dismissedEventIds.add(eventId);
-    }
-
-    private showNotification(event: CalendarEvent) {
-        if (this.dismissedEventIds.has(event.id)) {
-            console.log(`[CalendarManager] Suppressing notification for dismissed event: ${event.id}`);
-            return;
-        }
-
-        // Primary channel: emit an in-app alert so the Launcher (if alive) can
-        // show a rich modal prompt with "Yes, get ready" / "Not this one".
-        // Main.ts forwards this to every renderer AND raises the window.
-        this.emit('event-imminent', event);
-
-        // Secondary channel: fire the native OS notification too, so the user
-        // is still alerted if the sensi window is hidden or on another desktop.
-        const { Notification } = require('electron');
-        const notif = new Notification({
-            title: 'Meeting starting soon',
-            body: `"${event.title}" starts in 2 minutes. Bring sensi along?`,
-            actions: [
-                { type: 'button', text: 'Yes' },
-                { type: 'button', text: 'Not this one' }
-            ],
-            sound: true
-        });
-
-        notif.on('action', (_evt: any, index: number) => {
-            if (index === 0) {
-                this.emit('start-meeting-requested', event);
-            } else if (index === 1) {
-                this.dismissEvent(event.id);
-            }
-        });
-
-        notif.on('click', () => {
-            // Clicking the body (not an action button) just brings sensi forward
-            this.emit('open-requested');
-        });
-
-        notif.show();
-    }
-
-    // =========================================================================
     // Fetch Logic
     // =========================================================================
 
@@ -463,7 +376,6 @@ export class CalendarManager extends EventEmitter {
         }
 
         const events = await this.fetchEventsInternal();
-        this.scheduleReminders(events);
         return events;
     }
 

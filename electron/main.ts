@@ -3028,68 +3028,9 @@ async function initializeApp() {
       console.warn('[Main] Could not wire AuthManager → CalendarManager bridge:', (e as Error)?.message);
     }
 
-    calMgr.on('start-meeting-requested', (event: any) => {
-      console.log('[Main] Start meeting requested from calendar notification', event);
-      appState.centerAndShowWindow();
-      appState.startMeeting({
-        title: event.title,
-        calendarEventId: event.id,
-        source: 'calendar'
-      });
-    });
-
     calMgr.on('open-requested', () => {
       appState.centerAndShowWindow();
     });
-
-    // Pre-meeting alert: raise the window + push a rich in-app prompt to the
-    // renderer so the user gets an active "Bring sensi?" decision UI alongside
-    // the native OS notification. Respects the preMeetingAlertsEnabled setting.
-    calMgr.on('event-imminent', (event: any) => {
-      const alertsEnabled = SettingsManager.getInstance().get('preMeetingAlertsEnabled') ?? true;
-      if (!alertsEnabled) {
-        console.log('[Main] event-imminent received but pre-meeting alerts are disabled');
-        return;
-      }
-      console.log('[Main] event-imminent — surfacing pre-meeting prompt:', event?.title);
-      // Surface the launcher so the modal is visible. If the user is deep in
-      // another app we still broadcast; the renderer stores the alert and
-      // shows it the moment the window is next focused.
-      try { appState.centerAndShowWindow(); } catch (e) { /* best effort */ }
-      appState.broadcast('pre-meeting-alert', event);
-    });
-
-    // v2.5.1 — Meeting detection (actual running app, not calendar). When
-    // a Zoom/Teams/Meet/etc. process enters, reuse the same in-app prompt
-    // modal that the calendar-based alert uses. Distinguishable by the
-    // synthetic event id (prefix `detected:`).
-    try {
-      const { MeetingDetector } = require('./services/MeetingDetector') as typeof import('./services/MeetingDetector');
-      const detector = MeetingDetector.getInstance();
-      const detectEnabled = SettingsManager.getInstance().get('meetingAutoDetectEnabled') ?? true;
-      detector.setEnabled(detectEnabled);
-      if (detectEnabled) detector.start();
-
-      detector.on('meeting-started', (detection: import('./services/MeetingDetector').DetectedMeeting) => {
-        if (appState.getIsMeetingActive()) {
-          // Already recording — no need to prompt
-          console.log('[Main] meeting-started ignored: sensi meeting already active');
-          return;
-        }
-        console.log(`[Main] meeting-started: ${detection.appLabel}`);
-        try { appState.centerAndShowWindow(); } catch (e) { /* best effort */ }
-        const syntheticEvent = {
-          id: `detected:${detection.app}:${detection.detectedAt}`,
-          title: `${detection.appLabel} meeting`,
-          startTime: new Date(detection.detectedAt).toISOString(),
-          endTime: new Date(detection.detectedAt + 60 * 60 * 1000).toISOString(),
-        };
-        appState.broadcast('pre-meeting-alert', syntheticEvent);
-      });
-      console.log('[Main] MeetingDetector initialized (enabled =', detectEnabled, ')');
-    } catch (err) {
-      console.error('[Main] Failed to initialize MeetingDetector:', err);
-    }
 
     // sensi M7 / PERSONA-01 (v2.10.0): PersonaManager — owns user_persona
     // table and extraction pipeline. Binds to the live DB handle + a

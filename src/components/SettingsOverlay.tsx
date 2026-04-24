@@ -403,12 +403,6 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
     // Lower = responds sooner (may fire on partial questions); higher = waits
     // for complete questions (adds latency). Range 1500–4000 ms, default 2500.
     const [rollingSilenceMs, setRollingSilenceMs] = useState<number>(2500);
-    // v2.4.7: pre-meeting alert toggle. When true (default), sensi surfaces the
-    // launcher with a "Bring sensi?" modal 2 min before any calendar event.
-    const [preMeetingAlerts, setPreMeetingAlerts] = useState(true);
-    // v2.5.1: meeting auto-detect. When a Zoom/Teams/Meet app starts, sensi
-    // prompts whether to come along. Independent of calendar-based alerts.
-    const [meetingAutoDetect, setMeetingAutoDetect] = useState(true);
     // v2.6.1: Interview Mode mirror in main Settings → General. Same backing
     // store as the overlay popup's Interview Mode toggle (actionButtonMode
     // 'recap' <-> 'brainstorm'). When on, the third quick-action chip swaps
@@ -489,8 +483,6 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                     setRollingSilenceMs(ms);
                 }
             }).catch(() => { });
-            window.electronAPI?.getPreMeetingAlertsEnabled?.().then(setPreMeetingAlerts).catch(() => { });
-            window.electronAPI?.getMeetingAutoDetectEnabled?.().then(setMeetingAutoDetect).catch(() => { });
             window.electronAPI?.getOnlineAssessmentModeEnabled?.().then(setOnlineAssessmentMode).catch(() => { });
             // @ts-ignore — same API the overlay popup uses
             window.electronAPI?.getActionButtonMode?.().then((m: 'recap' | 'brainstorm') => {
@@ -1658,31 +1650,6 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                             </div>
                                         )}
 
-                                        {/* Pre-meeting alert toggle. When on, sensi pops up 2 min before each calendar event asking "Bring sensi?". */}
-                                        <div className={`${isLight ? 'bg-bg-card' : 'bg-bg-item-surface'} rounded-xl p-5 border border-border-subtle flex items-center justify-between transition-all ${preMeetingAlerts ? 'shadow-lg shadow-[var(--accent-primary)]/10' : ''}`}>
-                                            <div className="flex flex-col gap-1">
-                                                <div className="flex items-center gap-2">
-                                                    <Calendar size={18} className={preMeetingAlerts ? 'text-[var(--accent-primary)]' : 'text-text-primary'} />
-                                                    <h3 className="text-lg font-bold text-text-primary">Pre-meeting alert (calendar)</h3>
-                                                </div>
-                                                <p className="text-xs text-text-secondary">
-                                                    {preMeetingAlerts
-                                                        ? 'Sensi pops up 2 minutes before each Google Calendar event asking whether to come along.'
-                                                        : 'Off: no calendar-based pop-up. Native system notifications still fire unless disabled at the OS level.'}
-                                                </p>
-                                            </div>
-                                            <div
-                                                onClick={() => {
-                                                    const newState = !preMeetingAlerts;
-                                                    setPreMeetingAlerts(newState);
-                                                    window.electronAPI?.setPreMeetingAlertsEnabled?.(newState).catch(() => { });
-                                                }}
-                                                className={`w-11 h-6 rounded-full relative transition-colors cursor-pointer ${preMeetingAlerts ? 'bg-[var(--accent-primary)]' : 'bg-bg-toggle-switch border border-border-muted'}`}
-                                            >
-                                                <div className={`absolute top-1 left-1 w-4 h-4 rounded-full bg-[#F1EDE6] shadow-[0_1px_2px_rgba(0,0,0,0.25)] transition-transform ${preMeetingAlerts ? 'translate-x-5' : 'translate-x-0'}`} />
-                                            </div>
-                                        </div>
-
                                         {/* v2.6.1: Interview Mode mirror. Toggling here syncs the overlay popup. */}
                                         <div className={`${isLight ? 'bg-bg-card' : 'bg-bg-item-surface'} rounded-xl p-5 border border-border-subtle flex items-center justify-between transition-all ${actionButtonMode === 'brainstorm' ? 'shadow-lg shadow-violet-500/10' : ''}`}>
                                             <div className="flex flex-col gap-1">
@@ -1736,31 +1703,6 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                                 className={`w-11 h-6 rounded-full relative transition-colors cursor-pointer focus:outline-none ${onlineAssessmentMode ? 'bg-[var(--accent-primary)]' : 'bg-bg-toggle-switch border border-border-muted'}`}
                                             >
                                                 <div className={`absolute top-1 left-1 w-4 h-4 rounded-full bg-[#F1EDE6] shadow-sm transition-transform ${onlineAssessmentMode ? 'translate-x-5' : 'translate-x-0'}`} />
-                                            </div>
-                                        </div>
-
-                                        {/* Meeting auto-detect (v2.5.1). Prompts when sensi detects a Zoom/Teams/Meet app is running. */}
-                                        <div className={`${isLight ? 'bg-bg-card' : 'bg-bg-item-surface'} rounded-xl p-5 border border-border-subtle flex items-center justify-between transition-all ${meetingAutoDetect ? 'shadow-lg shadow-[var(--accent-primary)]/10' : ''}`}>
-                                            <div className="flex flex-col gap-1">
-                                                <div className="flex items-center gap-2">
-                                                    <Activity size={18} className={meetingAutoDetect ? 'text-[var(--accent-primary)]' : 'text-text-primary'} />
-                                                    <h3 className="text-lg font-bold text-text-primary">Auto-detect meetings</h3>
-                                                </div>
-                                                <p className="text-xs text-text-secondary">
-                                                    {meetingAutoDetect
-                                                        ? 'Sensi prompts when it detects a call has started in Zoom, Teams, Meet, Slack, Discord, Webex, or GoToMeeting.'
-                                                        : 'Off: sensi won\'t detect running meeting apps. You\'ll need to start sensi manually from the launcher.'}
-                                                </p>
-                                            </div>
-                                            <div
-                                                onClick={() => {
-                                                    const newState = !meetingAutoDetect;
-                                                    setMeetingAutoDetect(newState);
-                                                    window.electronAPI?.setMeetingAutoDetectEnabled?.(newState).catch(() => { });
-                                                }}
-                                                className={`w-11 h-6 rounded-full relative transition-colors cursor-pointer ${meetingAutoDetect ? 'bg-[var(--accent-primary)]' : 'bg-bg-toggle-switch border border-border-muted'}`}
-                                            >
-                                                <div className={`absolute top-1 left-1 w-4 h-4 rounded-full bg-[#F1EDE6] shadow-[0_1px_2px_rgba(0,0,0,0.25)] transition-transform ${meetingAutoDetect ? 'translate-x-5' : 'translate-x-0'}`} />
                                             </div>
                                         </div>
 

@@ -272,14 +272,6 @@ export interface ElectronAPI {
   setGoogleOauthCredentials: (payload: { clientId: string; clientSecret: string }) => Promise<{ success: boolean; error?: string }>
   clearGoogleOauthCredentials: () => Promise<{ success: boolean; error?: string }>
 
-  // Pre-meeting alerts
-  onPreMeetingAlert: (callback: (event: { id: string; title: string; startTime: string; endTime: string; link?: string }) => void) => () => void
-  preMeetingAcceptAlert: (event: { id: string; title: string }) => Promise<{ success: boolean; error?: string }>
-  preMeetingDismissAlert: (event: { id: string }) => Promise<{ success: boolean; error?: string }>
-  getPreMeetingAlertsEnabled: () => Promise<boolean>
-  setPreMeetingAlertsEnabled: (enabled: boolean) => Promise<{ success: boolean; error?: string }>
-  getMeetingAutoDetectEnabled: () => Promise<boolean>
-  setMeetingAutoDetectEnabled: (enabled: boolean) => Promise<{ success: boolean; error?: string }>
   getOnlineAssessmentModeEnabled: () => Promise<boolean>
   setOnlineAssessmentModeEnabled: (enabled: boolean) => Promise<{ success: boolean; error?: string }>
   onOnlineAssessmentModeChanged: (callback: (enabled: boolean) => void) => () => void

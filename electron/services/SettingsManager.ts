@@ -23,13 +23,6 @@ export interface AppSettings {
     // Lower = more responsive, higher = waits for the full question.
     // Typical range 1500–4000 ms. Default 2500 ms.
     rollingTriggerSilenceMs?: number;
-    // PRE-MEETING-ALERT: when a calendar event is ~2 min from start, surface
-    // the launcher window with a "Bring sensi?" modal. Default true.
-    preMeetingAlertsEnabled?: boolean;
-    // v2.5.1 MeetingDetector: when an actual meeting app is detected running
-    // (Zoom, Teams, Meet, etc.) sensi prompts with "Bring sensi? Yes/No".
-    // Independent of the calendar-based pre-meeting alert. Default true.
-    meetingAutoDetectEnabled?: boolean;
     // v2.6.2: Online Assessment mode — for LeetCode / HackerRank / coding
     // assessments done solo (no interviewer watching). When on, pressing
     // "What to answer?" takes a fresh screenshot and asks the LLM for a
