@@ -2,7 +2,6 @@ import { IEmbeddingProvider } from './providers/IEmbeddingProvider';
 import { OpenAIEmbeddingProvider } from './providers/OpenAIEmbeddingProvider';
 import { GeminiEmbeddingProvider } from './providers/GeminiEmbeddingProvider';
 import { OllamaEmbeddingProvider } from './providers/OllamaEmbeddingProvider';
-import { LocalEmbeddingProvider } from './providers/LocalEmbeddingProvider';
 
 export interface AppAPIConfig {
   openaiKey?: string;
@@ -13,8 +12,14 @@ export interface AppAPIConfig {
 export class EmbeddingProviderResolver {
   /**
    * Returns the best available provider.
-   * Runs isAvailable() checks in priority order.
-   * Local model is the unconditional fallback — always last.
+   * Runs isAvailable() checks in priority order: OpenAI → Gemini → Ollama.
+   * v2.17.1: LocalEmbeddingProvider (Xenova/all-MiniLM via
+   * @xenova/transformers) was removed — the 95 MB dep + ~250 MB ONNX
+   * download was too expensive for a fallback that only triggered when
+   * every cloud key + Ollama was missing. If no cloud key is set and
+   * Ollama isn't running, RAG is disabled rather than silently falling
+   * back to on-device. Run `ollama serve` or add an OpenAI/Gemini key
+   * in Settings → AI Providers to enable embeddings.
    */
   static async resolve(config: AppAPIConfig): Promise<IEmbeddingProvider> {
     const candidates: IEmbeddingProvider[] = [];
@@ -25,9 +30,8 @@ export class EmbeddingProviderResolver {
     if (config.geminiKey) {
       candidates.push(new GeminiEmbeddingProvider(config.geminiKey));
     }
-    
+
     candidates.push(new OllamaEmbeddingProvider(config.ollamaUrl || 'http://localhost:11434'));
-    candidates.push(new LocalEmbeddingProvider()); // always last, always works
 
     for (const provider of candidates) {
       const available = await provider.isAvailable();
@@ -38,8 +42,8 @@ export class EmbeddingProviderResolver {
       console.log(`[EmbeddingProviderResolver] Provider ${provider.name} unavailable, trying next...`);
     }
 
-    // This should never happen since LocalEmbeddingProvider.isAvailable() 
-    // only returns false if the bundled model is corrupted — a fatal install error
-    throw new Error('No embedding provider available. The bundled model may be corrupted. Please reinstall.');
+    throw new Error(
+      'No embedding provider available. Add an OpenAI or Gemini API key in Settings → AI Providers, or start Ollama locally.',
+    );
   }
 }

@@ -1,13 +1,14 @@
 // electron/llm/IntentClassifier.ts
 // Lightweight intent classification for "What should I say?"
-// Micro step that runs before answer generation
+// Micro step that runs before answer generation.
 //
-// Two-tier classification:
+// v2.17.1: the zero-shot local SLM tier (Xenova/mobilebert-uncased-mnli
+// via @xenova/transformers) was removed — the 95 MB dep + 250 MB ONNX
+// model download on first use was too much for a single heuristic. The
+// same downstream LLM call now handles ambiguous intents implicitly.
+// Two remaining tiers:
 //   1. Regex fast-path (< 1ms) for common patterns
-//   2. Local SLM fallback (zero-shot, ~10-50ms) for messy/ambiguous speech
-
-import path from 'path';
-import { app } from 'electron';
+//   2. Context-based fallback for anything else
 
 export type ConversationIntent =
     | 'clarification'      // "Can you explain that?"
@@ -39,141 +40,6 @@ const INTENT_ANSWER_SHAPES: Record<ConversationIntent, string> = {
     coding: 'Provide a FULL, complete, working and production-ready code implementation (including necessary boilerplate like Java imports/classes). Start with a brief approach description, then the fully runnable code block, then a concise explanation of why this approach works.',
     general: 'Respond naturally based on context. Keep it conversational and direct.'
 };
-
-// ========================
-// Zero-Shot SLM Classifier
-// ========================
-
-/**
- * Candidate labels for zero-shot classification.
- * These map to ConversationIntent types.
- */
-const ZERO_SHOT_LABELS: Record<string, ConversationIntent> = {
-    'asking for clarification or explanation': 'clarification',
-    'asking about what happened next or follow-up': 'follow_up',
-    'requesting more detail or deeper explanation': 'deep_dive',
-    'asking for a personal experience or behavioral example': 'behavioral',
-    'requesting a concrete example or instance': 'example_request',
-    'summarizing or confirming understanding': 'summary_probe',
-    'asking about code, programming, or implementation': 'coding',
-    'general conversation or question': 'general',
-};
-
-const ZERO_SHOT_LABEL_KEYS = Object.keys(ZERO_SHOT_LABELS);
-
-/** Minimum confidence from the SLM to trust its classification */
-const SLM_CONFIDENCE_THRESHOLD = 0.35;
-
-/**
- * Singleton lazy-loaded zero-shot classifier using @xenova/transformers
- */
-class ZeroShotClassifier {
-    private static instance: ZeroShotClassifier | null = null;
-    private pipe: any = null;
-    private loadingPromise: Promise<void> | null = null;
-    private loadFailed = false;
-
-    private constructor() {}
-
-    static getInstance(): ZeroShotClassifier {
-        if (!ZeroShotClassifier.instance) {
-            ZeroShotClassifier.instance = new ZeroShotClassifier();
-        }
-        return ZeroShotClassifier.instance;
-    }
-
-    /**
-     * Lazy-load the zero-shot classification model.
-     * Uses Xenova/mobilebert-uncased-mnli — tiny (~100MB quantized), fast (~10-50ms inference).
-     */
-    private async ensureLoaded(): Promise<void> {
-        if (this.pipe) return;
-        if (this.loadFailed) return;
-
-        if (this.loadingPromise) {
-            await this.loadingPromise;
-            return;
-        }
-
-        this.loadingPromise = (async () => {
-            try {
-                // Bypass TypeScript converting import() to require() for ESM packages
-                const { pipeline, env } = await new Function("return import('@xenova/transformers')")();
-
-                // In production, use bundled model. In dev, allow remote download.
-                if (app.isPackaged) {
-                    env.allowRemoteModels = false;
-                    env.localModelPath = path.join(process.resourcesPath, 'models');
-                } else {
-                    // Dev mode: allow downloading from HuggingFace Hub
-                    env.allowRemoteModels = true;
-                    env.cacheDir = path.join(__dirname, '../../resources/models');
-                }
-
-                console.log('[IntentClassifier] Loading zero-shot classifier (mobilebert-uncased-mnli)...');
-                this.pipe = await pipeline(
-                    'zero-shot-classification',
-                    'Xenova/mobilebert-uncased-mnli',
-                    { local_files_only: app.isPackaged }
-                );
-                console.log('[IntentClassifier] Zero-shot classifier loaded successfully.');
-            } catch (e) {
-                console.warn('[IntentClassifier] Failed to load zero-shot model, regex-only fallback:', e);
-                this.loadFailed = true;
-                this.pipe = null;
-            }
-        })();
-
-        try {
-            await this.loadingPromise;
-        } catch {
-            this.loadingPromise = null;
-        }
-    }
-
-    /**
-     * Classify text using the zero-shot model.
-     * Returns null if the model isn't loaded or classification fails.
-     */
-    async classify(text: string): Promise<IntentResult | null> {
-        await this.ensureLoaded();
-        if (!this.pipe) return null;
-
-        try {
-            const result = await this.pipe(text, ZERO_SHOT_LABEL_KEYS, {
-                multi_label: false,
-            });
-
-            // result has { labels: string[], scores: number[] }
-            const topLabel = result.labels[0];
-            const topScore = result.scores[0];
-
-            if (topScore < SLM_CONFIDENCE_THRESHOLD) {
-                return null; // Not confident enough
-            }
-
-            const intent = ZERO_SHOT_LABELS[topLabel] || 'general';
-            console.log(`[IntentClassifier] SLM classified as "${intent}" (${(topScore * 100).toFixed(1)}%): "${text.substring(0, 60)}..."`);
-
-            return {
-                intent,
-                confidence: topScore,
-                answerShape: INTENT_ANSWER_SHAPES[intent],
-            };
-        } catch (e) {
-            console.warn('[IntentClassifier] SLM classification error:', e);
-            return null;
-        }
-    }
-
-    /**
-     * Warm up the model in background (non-blocking).
-     * Call this early in app lifecycle to avoid cold-start latency.
-     */
-    warmup(): void {
-        this.ensureLoaded().catch(() => {});
-    }
-}
 
 // ========================
 // Regex Fast-Path
@@ -262,8 +128,7 @@ function detectIntentByContext(
  *
  * Three-tier priority:
  *   1. Regex fast-path (< 1ms, high confidence)
- *   2. Zero-shot SLM fallback (~10-50ms, medium-high confidence)
- *   3. Context-based heuristic (0ms, low confidence)
+ *   2. Context-based heuristic (0ms, low confidence)
  */
 export async function classifyIntent(
     lastInterviewerTurn: string | null,
@@ -276,17 +141,9 @@ export async function classifyIntent(
         if (patternResult) {
             return patternResult;
         }
-
-        // Tier 2: Try zero-shot SLM (if regex didn't match)
-        if (lastInterviewerTurn.trim().length > 5) {
-            const slmResult = await ZeroShotClassifier.getInstance().classify(lastInterviewerTurn);
-            if (slmResult) {
-                return slmResult;
-            }
-        }
     }
 
-    // Tier 3: Fall back to context-based heuristic
+    // Tier 2: Fall back to context-based heuristic
     return detectIntentByContext(recentTranscript, assistantMessageCount);
 }
 
@@ -298,9 +155,9 @@ export function getAnswerShapeGuidance(intent: ConversationIntent): string {
 }
 
 /**
- * Pre-warm the SLM model in background.
- * Call this during app initialization to avoid cold-start on first classification.
+ * No-op warmup shim kept for call-site compatibility.
+ * The local SLM was removed in v2.17.1 — nothing to warm up anymore.
  */
 export function warmupIntentClassifier(): void {
-    ZeroShotClassifier.getInstance().warmup();
+    // intentionally empty
 }
