@@ -7,6 +7,30 @@ fetches from the GitHub release body, which is seeded from this file).
 
 ---
 
+## [2.17.4] — 2026-04-25
+
+Follow-up to 2.17.3 — fixes the stale Windows build that was published
+under the v2.17.3 tag, and removes the now-orphaned launcher refresh
+button.
+
+### Removed
+- **Launcher refresh / sync button** in the header (next to the sensi
+  logo). Used to call `calendar-refresh` IPC; meaningless after the
+  v2.17.3 calendar strip.
+- **"Refreshed — Synced with calendar" toast** that fired after the
+  refresh button.
+
+### Fixed
+- **Windows installer was packaged with stale v2.17.2 renderer code**
+  (electron-builder ran without a preceding `npm run build`). v2.17.4
+  Windows is built from clean source.
+- **Mac CI tag-push trigger** removed — every release fired a duplicate
+  Mac build off the wrong commit (`main`'s legacy Natively-era HEAD)
+  which always failed asset upload. Manual `workflow_dispatch` is now
+  the sole source of truth for Mac builds.
+
+---
+
 ## [2.17.3] — 2026-04-24
 
 Removes the Calendar / Upcoming Meetings surface entirely. Google's "this

@@ -78,8 +78,6 @@ const Launcher: React.FC<LauncherProps> = ({ onStartMeeting, onOpenSettings, onP
     const [isDetectable, setIsDetectable] = useState(false);
     const [isMeetingActive, setIsMeetingActive] = useState(false);
     const [selectedMeeting, setSelectedMeeting] = useState<Meeting | null>(null);
-    const [isRefreshing, setIsRefreshing] = useState(false);
-    const [showNotification, setShowNotification] = useState(false);
 
     // Global search state (for AI chat overlay)
     const [isGlobalChatOpen, setIsGlobalChatOpen] = useState(false);
@@ -147,19 +145,6 @@ const Launcher: React.FC<LauncherProps> = ({ onStartMeeting, onOpenSettings, onP
     const fetchMeetings = () => {
         if (window.electronAPI && window.electronAPI.getRecentMeetings) {
             window.electronAPI.getRecentMeetings().then(setMeetings).catch(err => console.error("Failed to fetch meetings:", err));
-        }
-    };
-
-    const handleRefresh = async () => {
-        setIsRefreshing(true);
-        try {
-            setShowNotification(true);
-            fetchMeetings();
-            setTimeout(() => setShowNotification(false), 3000);
-        } catch (e) {
-            console.error("Refresh failed in handleRefresh:", e);
-        } finally {
-            setTimeout(() => setIsRefreshing(false), 500);
         }
     };
 
@@ -492,16 +477,6 @@ const Launcher: React.FC<LauncherProps> = ({ onStartMeeting, onOpenSettings, onP
 
                                             <div className="w-px h-6 bg-border-subtle mx-1" />
 
-                                            {/* Refresh Button */}
-                                            <button
-                                                onClick={handleRefresh}
-                                                disabled={isRefreshing}
-                                                className={`p-2 text-text-tertiary hover:text-text-primary rounded-md transition-colors ${isRefreshing ? 'animate-spin text-[var(--accent-primary)]' : ''} ${isLight ? 'hover:bg-black/[0.04]' : 'hover:bg-white/[0.05]'}`}
-                                                title="Refresh State"
-                                            >
-                                                <RefreshCw size={15} />
-                                            </button>
-
                                             {/* Detectable Toggle Pill */}
                                             <div className={`flex items-center gap-3 border rounded-full px-3 py-1.5 min-w-[140px] transition-colors ${isLight ? 'bg-bg-elevated border-border-muted shadow-sm' : 'bg-[#101011] border-border-muted'}`}>
                                                 {isDetectable ? (
@@ -803,34 +778,6 @@ const Launcher: React.FC<LauncherProps> = ({ onStartMeeting, onOpenSettings, onP
             </div>
 
 
-
-            {/* Notification Toast - Liquid Glass (macOS 26 Tahoe Concept) */}
-            <AnimatePresence>
-                {showNotification && (
-                    <motion.div
-                        initial={{ x: 300, opacity: 0, scale: 0.9 }}
-                        animate={{ x: 0, opacity: 1, scale: 1 }}
-                        exit={{ x: 300, opacity: 0, scale: 0.95 }}
-                        transition={{ type: "spring", stiffness: 350, damping: 30, mass: 1 }}
-                        className={`fixed bottom-10 right-10 z-[2000] flex items-center gap-4 pl-4 pr-6 py-3.5 rounded-[18px] backdrop-blur-xl saturate-[180%] ring-1 ring-black/10 ${isLight ? 'bg-bg-elevated/90 border border-border-muted shadow-[0_8px_32px_rgba(0,0,0,0.15),inset_0_1px_0_rgba(255,255,255,0.9)]' : 'bg-[#2A2A2E]/40 border border-white/10 shadow-[0_40px_80px_-20px_rgba(0,0,0,0.6),inset_0_1px_0_rgba(255,255,255,0.3),inset_0_-1px_0_rgba(255,255,255,0.05)]'}`}
-                    >
-                        {/* Liquid Icon Orb */}
-                        <div className="relative flex items-center justify-center w-9 h-9 rounded-full bg-gradient-to-b from-blue-400/20 to-blue-600/20 shadow-[inset_0_1px_0_rgba(255,255,255,0.2)] border border-white/5">
-                            <div className="absolute inset-0 rounded-full bg-[var(--accent-primary)]/20 blur-md" />
-                            <RefreshCw size={15} className="text-[var(--accent-primary)] animate-[spin_2s_linear_infinite] drop-shadow-[0_0_5px_rgba(184,145,92,0.6)]" />
-                        </div>
-
-                        {/* Text Content */}
-                        <div className="flex flex-col gap-0.5">
-                            <span className="text-[14px] font-semibold text-text-primary leading-none tracking-tight">Refreshed</span>
-                            <span className="text-[11px] text-text-tertiary font-medium leading-none tracking-wide">Synced with calendar</span>
-                        </div>
-
-                        {/* Specular Highlight Overlay */}
-                        <div className="absolute inset-0 rounded-[18px] bg-gradient-to-tr from-white/5 via-transparent to-transparent pointer-events-none" />
-                    </motion.div>
-                )}
-            </AnimatePresence>
 
             {/* Global Chat Overlay */}
             <GlobalChatOverlay
