@@ -66,9 +66,6 @@ type Tokens = {
     refreshExp: number;
     tier: 'free' | 'pro';
     userId: string;
-    googleAccess?: string;
-    googleAccessExp?: number;
-    googleRefresh?: string;
 };
 
 // ─────────────────────────────────────────────────────────────
@@ -186,17 +183,11 @@ export class AuthManager extends EventEmitter {
             refreshExpiresAt: parsed.refreshExp,
             userId: parsed.userId,
             tier: parsed.tier,
-            googleAccessToken: parsed.googleAccess,
-            googleAccessExpiresAt: parsed.googleAccessExp,
-            googleRefreshToken: parsed.googleRefresh,
         });
         this.startMePoll();
-        // Surface the fresh tokens to any listeners (CalendarManager will
-        // adopt the Google tokens when it hears this event).
         this.emit('signed-in', {
             userId: parsed.userId,
             tier: parsed.tier,
-            hasGoogleTokens: !!parsed.googleAccess,
         });
         await this.refreshMe();
         this.broadcastAuthState();
@@ -367,9 +358,6 @@ function parseCallbackTokens(callbackUrl: string): Tokens | null {
             return null;
         }
         const parsedTier: 'free' | 'pro' = tier === 'pro' ? 'pro' : 'free';
-        const googleAccess = qp.get('google_access') ?? undefined;
-        const googleAccessExp = qp.get('google_access_exp');
-        const googleRefresh = qp.get('google_refresh') ?? undefined;
         return {
             access,
             refresh,
@@ -377,9 +365,6 @@ function parseCallbackTokens(callbackUrl: string): Tokens | null {
             refreshExp: Number.parseInt(refreshExp, 10),
             userId,
             tier: parsedTier,
-            googleAccess,
-            googleAccessExp: googleAccessExp ? Number.parseInt(googleAccessExp, 10) : undefined,
-            googleRefresh,
         };
     } catch {
         return null;

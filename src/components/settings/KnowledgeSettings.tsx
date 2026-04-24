@@ -99,10 +99,6 @@ function shortProvider(model: string): string {
 export const KnowledgeSettings: React.FC = () => {
     const [docs, setDocs] = useState<KnowledgeDocumentMetadata[]>([]);
     const [pinnedIds, setPinnedIds] = useState<ReadonlySet<string>>(new Set());
-    // sensi M7 / KNOWLEDGE-02: per-doc attached-event counts. Used to
-    // render a "📎 N meetings" badge next to the name. Lazily populated
-    // after the main list load; a failure is silent (badge just stays 0).
-    const [attachedCounts, setAttachedCounts] = useState<Record<string, number>>({});
     const [loaded, setLoaded] = useState(false);
     const [busy, setBusy] = useState<BusyOp>(null);
     const [uiError, setUiError] = useState<UiErrorState | null>(null);
@@ -136,25 +132,6 @@ export const KnowledgeSettings: React.FC = () => {
 
             setDocs(docsRes.documents);
             setPinnedIds(new Set(pinnedRes.documents.map((d) => d.id)));
-            // sensi M7 / KNOWLEDGE-02: fetch attached-event counts per doc.
-            // Best-effort: silent on any per-doc failure.
-            void (async () => {
-                const api = window.electronAPI;
-                if (!api || typeof api.knowledgeListEventsForDocument !== 'function') return;
-                const entries = await Promise.all(
-                    docsRes.documents.map(async (d) => {
-                        try {
-                            const r = await api.knowledgeListEventsForDocument(d.id);
-                            return [d.id, r?.success ? r.eventIds.length : 0] as const;
-                        } catch {
-                            return [d.id, 0] as const;
-                        }
-                    })
-                );
-                const next: Record<string, number> = {};
-                for (const [id, n] of entries) next[id] = n;
-                setAttachedCounts(next);
-            })();
         } finally {
             setBusy(null);
             setLoaded(true);
@@ -530,18 +507,6 @@ export const KnowledgeSettings: React.FC = () => {
                                                 title="No extractable text — will not appear in retrieval"
                                             >
                                                 Empty
-                                            </span>
-                                        )}
-                                        {/* sensi M7 / KNOWLEDGE-02: attached-event chip.
-                                            Shown when this doc is attached to >=1 calendar event.
-                                            Click-through navigation to UpcomingMeetingsPanel is a
-                                            later polish — for v2.9.0 this is a passive badge. */}
-                                        {(attachedCounts[doc.id] ?? 0) > 0 && (
-                                            <span
-                                                className="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded bg-[var(--accent-primary)]/15 text-[var(--accent-primary)] inline-flex items-center gap-1"
-                                                title={`Attached to ${attachedCounts[doc.id]} calendar event${attachedCounts[doc.id] === 1 ? '' : 's'}`}
-                                            >
-                                                📎 {attachedCounts[doc.id]}
                                             </span>
                                         )}
                                     </div>

@@ -67,13 +67,6 @@ export interface StoredCredentials {
     // The pair is set together via setActiveProviderAndModel() so they cannot drift.
     activeProvider?: ProviderId;
     // sensi M0-T5: trial fields removed (personal-use mode, no natively cloud trial)
-    // v2.5.4: Google OAuth Desktop App credentials for the Calendar integration.
-    // Both fields are user-supplied via Settings → Calendar so sensi doesn't
-    // ship with shared OAuth quota. For Desktop OAuth apps Google explicitly
-    // states the client_secret is not actually secret (it's bundled with the
-    // installer), but we still encrypt both via safeStorage for hygiene.
-    googleOauthClientId?: string;
-    googleOauthClientSecret?: string;
     // sensi M8 / PASS B (v2.13.0): sensi-cloud managed auth.
     // Tokens returned by `sensi://auth/callback` after the user completes
     // Google sign-in via api.sensi.cloudfrontiers.co.uk. Access token is a
@@ -84,13 +77,6 @@ export interface StoredCredentials {
     sensiRefreshExpiresAt?: number;    // epoch seconds
     sensiUserId?: string;
     sensiTier?: 'free' | 'pro';
-    // Google OAuth tokens handed to the desktop alongside the sensi JWT so
-    // the user's Google Calendar connects automatically without a second
-    // OAuth consent step. Stored here (not in googleOauthClientId/Secret)
-    // to avoid mixing the two auth paths.
-    googleAccessToken?: string;
-    googleAccessExpiresAt?: number;    // epoch seconds
-    googleRefreshToken?: string;
     // sensi M8 / PASS B (v2.13.0): Outlook Calendar (Microsoft Graph).
     // Populated by the OutlookCalendarProvider's own desktop OAuth flow —
     // the backend does NOT mediate Outlook auth (unlike Google).
@@ -222,41 +208,10 @@ export class CredentialsManager {
         return { ...this.credentials };
     }
 
-    // v2.5.4: Google OAuth Desktop App credentials for the Calendar integration.
-    public getGoogleOauthClientId(): string | undefined {
-        return this.credentials.googleOauthClientId;
-    }
-    public getGoogleOauthClientSecret(): string | undefined {
-        return this.credentials.googleOauthClientSecret;
-    }
-    public hasGoogleOauthCredentials(): boolean {
-        return !!this.credentials.googleOauthClientId && !!this.credentials.googleOauthClientSecret;
-    }
-    public setGoogleOauthCredentials(clientId: string, clientSecret: string): void {
-        const trimId = (clientId ?? '').trim();
-        const trimSecret = (clientSecret ?? '').trim();
-        this.credentials.googleOauthClientId = trimId || undefined;
-        this.credentials.googleOauthClientSecret = trimSecret || undefined;
-        this.saveCredentials();
-        console.log('[CredentialsManager] Google OAuth client credentials updated');
-    }
-    public clearGoogleOauthCredentials(): void {
-        this.credentials.googleOauthClientId = undefined;
-        this.credentials.googleOauthClientSecret = undefined;
-        this.saveCredentials();
-        console.log('[CredentialsManager] Google OAuth client credentials cleared');
-    }
-
     // =========================================================================
-    // sensi M8 / PASS B (v2.13.0): sensi-cloud managed auth
-    //
-    // Two linked token bundles are stored:
-    //   1. sensi JWT pair (access + refresh) for api.sensi.cloudfrontiers.co.uk
-    //   2. Google OAuth tokens (access + refresh) issued to the SAME user so
-    //      Google Calendar auto-connects after sign-in.
-    //
-    // `sensiRefreshToken` rotates on every refresh; `googleRefreshToken` rarely
-    // changes. Both live in the safeStorage-encrypted credentials.enc file.
+    // sensi M8 / PASS B (v2.13.0): sensi-cloud managed auth — sensi JWT pair
+    // (access + refresh) for api.sensi.cloudfrontiers.co.uk. Stored in the
+    // safeStorage-encrypted credentials.enc file.
     // =========================================================================
 
     public getSensiAccessToken(): string | undefined {
@@ -285,16 +240,6 @@ export class CredentialsManager {
         return true;
     }
 
-    public getGoogleAccessToken(): string | undefined {
-        return this.credentials.googleAccessToken;
-    }
-    public getGoogleAccessExpiresAt(): number | undefined {
-        return this.credentials.googleAccessExpiresAt;
-    }
-    public getGoogleRefreshToken(): string | undefined {
-        return this.credentials.googleRefreshToken;
-    }
-
     public setSensiAuthBundle(bundle: {
         accessToken: string;
         refreshToken: string;
@@ -302,9 +247,6 @@ export class CredentialsManager {
         refreshExpiresAt: number;
         userId: string;
         tier: 'free' | 'pro';
-        googleAccessToken?: string;
-        googleAccessExpiresAt?: number;
-        googleRefreshToken?: string;
     }): void {
         this.credentials.sensiAccessToken = bundle.accessToken;
         this.credentials.sensiRefreshToken = bundle.refreshToken;
@@ -312,15 +254,6 @@ export class CredentialsManager {
         this.credentials.sensiRefreshExpiresAt = bundle.refreshExpiresAt;
         this.credentials.sensiUserId = bundle.userId;
         this.credentials.sensiTier = bundle.tier;
-        if (bundle.googleAccessToken) {
-            this.credentials.googleAccessToken = bundle.googleAccessToken;
-        }
-        if (bundle.googleAccessExpiresAt) {
-            this.credentials.googleAccessExpiresAt = bundle.googleAccessExpiresAt;
-        }
-        if (bundle.googleRefreshToken) {
-            this.credentials.googleRefreshToken = bundle.googleRefreshToken;
-        }
         this.saveCredentials();
         console.log('[CredentialsManager] sensi auth bundle stored (tier=' + bundle.tier + ')');
     }
@@ -340,15 +273,6 @@ export class CredentialsManager {
         this.saveCredentials();
     }
 
-    public updateGoogleAccessToken(pair: {
-        accessToken: string;
-        accessExpiresAt: number;
-    }): void {
-        this.credentials.googleAccessToken = pair.accessToken;
-        this.credentials.googleAccessExpiresAt = pair.accessExpiresAt;
-        this.saveCredentials();
-    }
-
     public clearSensiAuth(): void {
         this.credentials.sensiAccessToken = undefined;
         this.credentials.sensiRefreshToken = undefined;
@@ -356,9 +280,6 @@ export class CredentialsManager {
         this.credentials.sensiRefreshExpiresAt = undefined;
         this.credentials.sensiUserId = undefined;
         this.credentials.sensiTier = undefined;
-        this.credentials.googleAccessToken = undefined;
-        this.credentials.googleAccessExpiresAt = undefined;
-        this.credentials.googleRefreshToken = undefined;
         this.saveCredentials();
         console.log('[CredentialsManager] sensi auth bundle cleared');
     }

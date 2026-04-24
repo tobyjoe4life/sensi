@@ -4,13 +4,12 @@ import {
     X, Mic, Speaker, Monitor, Keyboard, User, LifeBuoy, LogOut, Upload,
     ArrowUp, ArrowDown, ArrowLeft, ArrowRight,
     Camera, RotateCcw, Eye, Layout, MessageSquare, Crop,
-    ChevronDown, ChevronUp, Check, BadgeCheck, Power, Palette, Calendar, Ghost, Sun, Moon, RefreshCw, Info, Globe, FlaskConical, Terminal, Settings, Activity, ExternalLink, Trash2,
+    ChevronDown, ChevronUp, Check, BadgeCheck, Power, Palette, Ghost, Sun, Moon, RefreshCw, Info, Globe, FlaskConical, Terminal, Settings, Activity, ExternalLink, Trash2,
     Sparkles, Pencil, Briefcase, Building2, Search, MapPin, CheckCircle, HelpCircle, Zap, SlidersHorizontal, PointerOff,
     Star, AlertCircle, Gift, BookOpen, UserCircle
 } from 'lucide-react';
 import { AboutSection } from './AboutSection';
 import { HelpSettings } from './settings/HelpSettings';
-import { GoogleCalendarSettings } from './settings/GoogleCalendarSettings';
 import { AIProvidersSettings } from './settings/AIProvidersSettings';
 import { KnowledgeSettings } from './settings/KnowledgeSettings';
 import { PersonaSettings } from './settings/PersonaSettings';
@@ -1174,22 +1173,6 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
     };
 
 
-    const [calendarStatus, setCalendarStatus] = useState<{ connected: boolean; email?: string }>({ connected: false });
-    const [isCalendarsLoading, setIsCalendarsLoading] = useState(false);
-
-    // sensi M8 / PASS B: listen for real-time calendar connection changes
-    // (e.g. after sign-in auto-connects Google Calendar) so the Calendar
-    // panel reflects reality without requiring the settings panel to reopen.
-    useEffect(() => {
-        const unsubscribe = window.electronAPI?.onCalendarConnectionChanged?.((status) => {
-            setCalendarStatus(status);
-        });
-        return () => {
-            if (typeof unsubscribe === 'function') unsubscribe();
-        };
-    }, []);
-
-
     // Load stored credentials on mount
 
 
@@ -1293,11 +1276,6 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
             // Load Experimental SCK pref
             const savedSck = localStorage.getItem('useExperimentalSckBackend') === 'true';
             setUseExperimentalSck(savedSck);
-
-            // Load Calendar Status
-            if (window.electronAPI?.getCalendarStatus) {
-                window.electronAPI.getCalendarStatus().then(setCalendarStatus);
-            }
         }
     }, [isOpen, selectedInput, selectedOutput]); // Re-run if isOpen changes, or if selected devices are cleared
 
@@ -1431,12 +1409,6 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                         className={`w-full text-left px-3 py-2 rounded-lg text-sm font-medium transition-colors flex items-center gap-3 ${activeTab === 'knowledge' ? 'bg-bg-item-active text-text-primary' : 'text-text-secondary hover:text-text-primary hover:bg-bg-item-active/50'}`}
                                     >
                                         <BookOpen size={16} /> Knowledge
-                                    </button>
-                                    <button
-                                        onClick={() => setActiveTab('calendar')}
-                                        className={`w-full text-left px-3 py-2 rounded-lg text-sm font-medium transition-colors flex items-center gap-3 ${activeTab === 'calendar' ? 'bg-bg-item-active text-text-primary' : 'text-text-secondary hover:text-text-primary hover:bg-bg-item-active/50'}`}
-                                    >
-                                        <Calendar size={16} /> Calendar
                                     </button>
                                     {/* sensi M7 / PERSONA-01: Persona tab (lightweight resume). */}
                                     <button
@@ -3586,16 +3558,6 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                 </div>
                             )}
 
-
-                            {activeTab === 'calendar' && (
-                                <GoogleCalendarSettings
-                                    isLight={isLight}
-                                    calendarStatus={calendarStatus}
-                                    setCalendarStatus={setCalendarStatus}
-                                    isCalendarsLoading={isCalendarsLoading}
-                                    setIsCalendarsLoading={setIsCalendarsLoading}
-                                />
-                            )}
 
                             {activeTab === 'account' && (
                                 <AccountSettings

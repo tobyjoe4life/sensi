@@ -228,7 +228,6 @@ export interface ElectronAPI {
   // Follow-up Email
   generateFollowupEmail: (input: any) => Promise<string>;
   extractEmailsFromTranscript: (transcript: Array<{ text: string }>) => Promise<string[]>;
-  getCalendarAttendees: (eventId: string) => Promise<Array<{ email: string; name: string }>>;
   openMailto: (params: { to: string; subject: string; body: string }) => Promise<{ success: boolean; error?: string }>;
 
   // Audio Test
@@ -256,16 +255,6 @@ export interface ElectronAPI {
   getThemeMode: () => Promise<{ mode: 'system' | 'light' | 'dark', resolved: 'light' | 'dark' }>
   setThemeMode: (mode: 'system' | 'light' | 'dark') => Promise<void>
   onThemeChanged: (callback: (data: { mode: 'system' | 'light' | 'dark', resolved: 'light' | 'dark' }) => void) => () => void
-
-  // Calendar
-  calendarConnect: () => Promise<{ success: boolean; error?: string }>
-  calendarDisconnect: () => Promise<{ success: boolean; error?: string }>
-  getCalendarStatus: () => Promise<{ connected: boolean; email?: string }>
-  getUpcomingEvents: () => Promise<Array<{ id: string; title: string; startTime: string; endTime: string; link?: string; source: 'google' }>>
-  calendarRefresh: () => Promise<{ success: boolean; error?: string }>
-  getGoogleOauthStatus: () => Promise<{ configured: boolean; maskedClientId: string | null }>
-  setGoogleOauthCredentials: (payload: { clientId: string; clientSecret: string }) => Promise<{ success: boolean; error?: string }>
-  clearGoogleOauthCredentials: () => Promise<{ success: boolean; error?: string }>
 
   getOnlineAssessmentModeEnabled: () => Promise<boolean>
   setOnlineAssessmentModeEnabled: (enabled: boolean) => Promise<{ success: boolean; error?: string }>
@@ -358,9 +347,6 @@ export interface ElectronAPI {
   perfSetLowResource: (enabled: boolean) => Promise<{ success: boolean }>
 
   onAuthStateChanged: (callback: (state: SensiAuthStateIpc) => void) => () => void
-  onCalendarConnectionChanged: (
-    callback: (status: { connected: boolean; email?: string }) => void,
-  ) => () => void
 
   // sensi M7 / RESEARCH-01: Standalone research
   researchRun: (query: string, scope?: 'company' | 'general') => Promise<{
@@ -515,56 +501,6 @@ export interface ElectronAPI {
     { success: true } | { success: false; error: string }
   >
 
-  // sensi M7 / PERSONA-02 — per-meeting JD binding
-  personaPickJDFile: () => Promise<
-    | { cancelled: true; filePath?: undefined }
-    | { cancelled: false; filePath: string; error?: undefined }
-    | { cancelled: false; filePath?: undefined; error: string }
-  >
-  personaUploadJD: (filePath: string, eventId: string) => Promise<
-    { success: true; summary: PersonaSummaryIpc }
-    | { success: false; error: string }
-  >
-  personaGetJDForEvent: (eventId: string) => Promise<
-    { success: true; summary: PersonaSummaryIpc | null }
-    | { success: false; error: string }
-  >
-  personaClearJD: (eventId: string) => Promise<
-    { success: true } | { success: false; error: string }
-  >
-
-  // sensi M7 / PREP-01 — pre-meeting briefing
-  prepGetBriefing: (payload: { eventId: string; title: string; description?: string; force?: boolean }) => Promise<
-    | { success: true; briefing: PrepBriefingIpc }
-    | { success: false; error: string }
-  >
-  prepInvalidate: (eventId: string) => Promise<
-    { success: true } | { success: false; error: string }
-  >
-
-  // sensi M7 / KNOWLEDGE-02 — per-meeting document binding.
-  // `document` is the same shape the renderer already uses for
-  // `knowledgeListDocuments` (KnowledgeDocumentMetadata). We keep the type
-  // loose as `unknown` for the suggestions array to avoid cross-file
-  // coupling — the UI casts to `KnowledgeDocumentMetadata` on consumption.
-  knowledgeAttachToEvent: (docId: string, eventId: string) => Promise<
-    { success: true } | { success: false; error: string }
-  >;
-  knowledgeDetachFromEvent: (docId: string, eventId: string) => Promise<
-    { success: true } | { success: false; error: string }
-  >;
-  knowledgeListForEvent: (eventId: string) => Promise<
-    | { success: true; documents: KnowledgeDocumentMetadata[] }
-    | { success: false; error: string }
-  >;
-  knowledgeListEventsForDocument: (docId: string) => Promise<
-    { success: true; eventIds: string[] } | { success: false; error: string }
-  >;
-  knowledgeSuggestForEvent: (eventId: string, searchText: string, topK?: number) => Promise<
-    | { success: true; suggestions: Array<{ document: KnowledgeDocumentMetadata; distance: number }> }
-    | { success: false; error: string }
-  >;
-
   // sensi M5-T5 — Rolling-response trigger mode (3 channels)
   //
   // Persistent cadence selector for the rolling-response loop.
@@ -703,23 +639,6 @@ export interface PersonaSummaryIpc {
   eventId: string | null
   updatedAt: string
   persona: ResumePersonaIpc | JDPersonaIpc
-}
-
-/**
- * sensi M7 / PREP-01 — pre-meeting briefing shape.
- */
-export interface PrepBriefingIpc {
-  eventId: string
-  title: string
-  generatedAt: number
-  brief: string
-  inputs: {
-    hasResume: boolean
-    hasJD: boolean
-    attachedDocCount: number
-    hasResearch: boolean
-    company?: string
-  }
 }
 
 export interface KnowledgeRetrievedChunk {

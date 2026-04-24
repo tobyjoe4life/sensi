@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { ToggleLeft, ToggleRight, Search, Zap, Calendar, ArrowRight, ArrowLeft, MoreHorizontal, Globe, Clock, ChevronRight, Settings, RefreshCw, Eye, EyeOff, Ghost, Plus, Mail, Link as LinkIcon, ChevronDown, Trash2, Bell, Check, Download, DownloadCloud, CheckCircle, AlertCircle } from 'lucide-react';
+import { ToggleLeft, ToggleRight, Search, Zap, ArrowRight, ArrowLeft, MoreHorizontal, Globe, Clock, ChevronRight, Settings, RefreshCw, Eye, EyeOff, Ghost, Plus, Mail, Link as LinkIcon, ChevronDown, Trash2, Bell, Check, Download, DownloadCloud, CheckCircle, AlertCircle } from 'lucide-react';
 import { generateMeetingPDF } from '../utils/pdfGenerator';
 import icon from "./icon.png";
 import { SensiMark } from './SensiLogoMark';
@@ -8,7 +8,6 @@ import MeetingDetails from './MeetingDetails';
 import TopSearchPill from './TopSearchPill';
 import GlobalChatOverlay from './GlobalChatOverlay';
 import { motion, AnimatePresence } from 'framer-motion';
-import { UpcomingMeetingsPanel } from './UpcomingMeetingsPanel';
 import { useShortcuts } from '../hooks/useShortcuts';
 import { useResolvedTheme } from '../hooks/useResolvedTheme';
 import { isMac } from '../utils/platformUtils';
@@ -79,9 +78,6 @@ const Launcher: React.FC<LauncherProps> = ({ onStartMeeting, onOpenSettings, onP
     const [isDetectable, setIsDetectable] = useState(false);
     const [isMeetingActive, setIsMeetingActive] = useState(false);
     const [selectedMeeting, setSelectedMeeting] = useState<Meeting | null>(null);
-    const [upcomingEvents, setUpcomingEvents] = useState<any[]>([]);
-    const [isPrepared, setIsPrepared] = useState(false);
-    const [preparedEvent, setPreparedEvent] = useState<any>(null);
     const [isRefreshing, setIsRefreshing] = useState(false);
     const [showNotification, setShowNotification] = useState(false);
 
@@ -154,30 +150,15 @@ const Launcher: React.FC<LauncherProps> = ({ onStartMeeting, onOpenSettings, onP
         }
     };
 
-    const fetchEvents = () => {
-        if (window.electronAPI && window.electronAPI.getUpcomingEvents) {
-            window.electronAPI.getUpcomingEvents().then(setUpcomingEvents).catch(err => console.error("Failed to fetch events:", err));
-        }
-    }
-
     const handleRefresh = async () => {
         setIsRefreshing(true);
         try {
-            if (window.electronAPI && window.electronAPI.calendarRefresh) {
-                setShowNotification(true);
-                await window.electronAPI.calendarRefresh();
-                fetchEvents();
-                fetchMeetings();
-                setTimeout(() => {
-                    setShowNotification(false);
-                }, 3000);
-            } else {
-                console.warn("electronAPI.calendarRefresh not found");
-            }
+            setShowNotification(true);
+            fetchMeetings();
+            setTimeout(() => setShowNotification(false), 3000);
         } catch (e) {
             console.error("Refresh failed in handleRefresh:", e);
         } finally {
-            // Ensure distinct feedback provided (min 500ms spin)
             setTimeout(() => setIsRefreshing(false), 500);
         }
     };
@@ -210,7 +191,6 @@ const Launcher: React.FC<LauncherProps> = ({ onStartMeeting, onOpenSettings, onP
         }
 
         fetchMeetings();
-        fetchEvents();
 
         // Sync initial meeting active state — guarded so unmounted component isn't written to
         if (window.electronAPI?.getMeetingActive) {
@@ -233,15 +213,11 @@ const Launcher: React.FC<LauncherProps> = ({ onStartMeeting, onOpenSettings, onP
             fetchMeetings();
         });
 
-        // Simple polling for events every minute
-        const interval = setInterval(fetchEvents, 60000);
-
         return () => {
             mounted = false;
             if (removeMeetingsListener) removeMeetingsListener();
             if (removeUndetectableListener) removeUndetectableListener();
             if (removeMeetingStateListener) removeMeetingStateListener();
-            clearInterval(interval);
         };
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []); // Mount-only: stable setup that must run exactly once
@@ -271,35 +247,6 @@ const Launcher: React.FC<LauncherProps> = ({ onStartMeeting, onOpenSettings, onP
             window.removeEventListener('keydown', handleKeyDown);
         };
     }, [isShortcutPressed]);
-
-    // Filter next meeting (within 60 mins)
-    const nextMeeting = upcomingEvents.find(e => {
-        const diff = new Date(e.startTime).getTime() - Date.now();
-        return diff > -5 * 60000 && diff < 60 * 60000; // -5 min to +60 min
-    });
-
-    const handlePrepare = (event: any) => {
-        setPreparedEvent(event);
-        setIsPrepared(true);
-    };
-
-    const handleStartPreparedMeeting = async () => {
-        if (!preparedEvent) return;
-        try {
-            const inputDeviceId = localStorage.getItem('preferredInputDeviceId');
-            const outputDeviceId = localStorage.getItem('preferredOutputDeviceId');
-
-            await window.electronAPI.startMeeting({
-                title: preparedEvent.title,
-                calendarEventId: preparedEvent.id,
-                source: 'calendar',
-                audio: { inputDeviceId, outputDeviceId }
-            });
-            setIsPrepared(false);
-        } catch (e) {
-            console.error("Failed to start prepared meeting", e);
-        }
-    };
 
     if (!window.electronAPI) {
         return <div className="text-white p-10">Error: Electron API not initialized. Check preload script.</div>;
@@ -708,122 +655,6 @@ const Launcher: React.FC<LauncherProps> = ({ onStartMeeting, onOpenSettings, onP
                                         </motion.button>
                                     </div>
 
-                                    {/* 2. Hero Section Cards */}
-                                    <div className="grid grid-cols-1 md:grid-cols-3 gap-3 h-[198px]">
-                                        {/* PREPARED STATE CARD */}
-                                        {isPrepared && preparedEvent ? (
-                                            <div className={`md:col-span-3 relative group rounded-xl overflow-hidden border border-emerald-500/30 ${isLight ? 'bg-bg-elevated' : 'bg-bg-secondary'} flex flex-col items-center justify-center p-6 bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-emerald-900/40 ${isLight ? 'via-bg-elevated to-bg-elevated' : 'via-bg-secondary to-bg-secondary'}`}>
-
-                                                <div className="absolute top-4 right-4 text-emerald-400">
-                                                    <Zap size={16} className="text-yellow-400" />
-                                                </div>
-
-                                                <div className="text-center max-w-lg z-10">
-                                                    <span className="inline-block px-3 py-1 rounded-full bg-emerald-500/10 text-emerald-400 text-[10px] font-bold tracking-wider mb-4 border border-emerald-500/20">
-                                                        READY TO JOIN
-                                                    </span>
-                                                    <h2 className="text-2xl font-bold text-text-primary mb-2">{preparedEvent.title}</h2>
-                                                    <p className="text-xs text-text-secondary mb-6 flex items-center justify-center gap-2">
-                                                        <Calendar size={12} />
-                                                        {new Date(preparedEvent.startTime).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })} - {new Date(preparedEvent.endTime).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}
-                                                        {preparedEvent.link && " • Link Ready"}
-                                                    </p>
-
-                                                    <div className="flex items-center gap-3 justify-center">
-                                                        <button
-                                                            onClick={handleStartPreparedMeeting}
-                                                            className="bg-emerald-500 hover:bg-emerald-400 text-white px-8 py-3 rounded-xl text-sm font-semibold transition-all shadow-lg hover:shadow-emerald-500/25 active:scale-95 flex items-center gap-2"
-                                                        >
-                                                            Start Meeting
-                                                            <ArrowRight size={16} />
-                                                        </button>
-                                                        <button
-                                                            onClick={() => setIsPrepared(false)}
-                                                            className="px-4 py-3 rounded-xl text-xs font-medium text-text-tertiary hover:text-white transition-colors"
-                                                        >
-                                                            Cancel
-                                                        </button>
-                                                    </div>
-                                                </div>
-
-                                                {/* Glows */}
-                                                <div className="absolute top-0 left-1/2 -translate-x-1/2 w-[300px] h-[300px] bg-emerald-500/10 blur-[100px] pointer-events-none" />
-                                            </div>
-                                        ) : (
-                                            /* Dynamic Next Meeting OR Default Intro */
-                                            nextMeeting ? (
-                                                <div className={`md:col-span-2 relative group rounded-xl overflow-hidden flex flex-col transition-all duration-300 ${isLight ? 'bg-bg-elevated border border-border-subtle shadow-[0_1px_3px_rgba(0,0,0,0.05),0_8px_24px_rgba(184,145,92,0.06)] hover:shadow-[0_1px_3px_rgba(0,0,0,0.05),0_12px_32px_rgba(184,145,92,0.10)]' : 'bg-bg-elevated border border-border-subtle shadow-[0_20px_40px_-12px_rgba(0,0,0,0.4),0_0_0_1px_rgba(184,145,92,0.04)] hover:shadow-[0_20px_40px_-12px_rgba(0,0,0,0.4),0_0_0_1px_rgba(184,145,92,0.12)]'}`}>
-                                                    {/* Brushstroke accent at top — echoes the SensiMark glyph */}
-                                                    <div className="absolute top-0 left-0 right-0 h-[2px] bg-gradient-to-r from-transparent via-[var(--accent-primary)] to-transparent opacity-60" />
-
-                                                    {/* Header */}
-                                                    <div className="p-5 flex-1 relative z-10">
-                                                        <div className="flex items-center gap-2 mb-2.5">
-                                                            <div className="relative flex items-center justify-center w-2 h-2">
-                                                                <div className="absolute inset-0 rounded-full bg-[var(--accent-primary)] opacity-30 animate-ping" />
-                                                                <div className="relative w-1.5 h-1.5 rounded-full bg-[var(--accent-primary)] shadow-[0_0_6px_rgba(184,145,92,0.8)]" />
-                                                            </div>
-                                                            <span className="text-[10.5px] font-bold text-[var(--accent-primary)] uppercase tracking-[0.18em]">Up Next</span>
-                                                            <span className="text-[11px] text-text-tertiary font-medium">
-                                                                Starts in {Math.max(0, Math.ceil((new Date(nextMeeting.startTime).getTime() - Date.now()) / 60000))} min
-                                                            </span>
-                                                        </div>
-
-                                                        <h2 className="text-[20px] font-celeb-light font-medium text-text-primary leading-[1.2] tracking-[-0.01em] mb-2.5 line-clamp-2">
-                                                            {nextMeeting.title}
-                                                        </h2>
-
-                                                        <div className="flex items-center gap-2 text-text-secondary text-[11.5px] mt-2">
-                                                            <Calendar size={11} className="opacity-70" />
-                                                            <span className="tabular-nums">
-                                                                {new Date(nextMeeting.startTime).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })} — {new Date(nextMeeting.endTime).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}
-                                                            </span>
-                                                            {nextMeeting.link && (
-                                                                <>
-                                                                    <span className="opacity-20">·</span>
-                                                                    <LinkIcon size={11} className="text-[var(--accent-primary)] opacity-80" />
-                                                                    <span className="text-[var(--accent-primary)] opacity-90">Link ready</span>
-                                                                </>
-                                                            )}
-                                                        </div>
-                                                    </div>
-
-                                                    {/* Actions */}
-                                                    <div className={`px-4 py-3 border-t border-border-subtle flex items-center gap-2 ${isLight ? 'bg-bg-elevated/60' : 'bg-black/20'}`}>
-                                                        <button
-                                                            onClick={() => handlePrepare(nextMeeting)}
-                                                            className="flex-1 px-4 py-2 rounded-md text-[12px] font-semibold transition-all flex items-center justify-center gap-2 active:scale-[0.98] bg-[var(--accent-primary)] text-[#16151A] hover:brightness-110 shadow-[0_2px_8px_-2px_rgba(184,145,92,0.4)]"
-                                                        >
-                                                            <Zap size={13} />
-                                                            Prepare
-                                                        </button>
-                                                        <button
-                                                            onClick={onStartMeeting}
-                                                            className={`px-4 py-2 rounded-md text-[12px] font-medium transition-all active:scale-[0.98] ${isLight ? 'text-text-secondary hover:text-text-primary hover:bg-bg-item-surface' : 'text-text-secondary hover:text-text-primary hover:bg-white/[0.04]'}`}
-                                                        >
-                                                            Start now
-                                                        </button>
-                                                    </div>
-
-                                                    {/* Warm brass glow (replaces cool green) */}
-                                                    <div className="absolute top-0 right-0 w-[180px] h-[180px] bg-[var(--accent-primary)] opacity-[0.08] blur-[70px] pointer-events-none" />
-                                                    <div className="absolute bottom-0 left-0 w-[120px] h-[120px] bg-[var(--accent-primary)] opacity-[0.04] blur-[60px] pointer-events-none" />
-                                                </div>
-                                            ) : (
-                                                <div className="md:col-span-2 h-full">
-                                                    <UpcomingMeetingsPanel
-                                                        events={upcomingEvents}
-                                                        onPrepare={handlePrepare}
-                                                        onRefresh={handleRefresh}
-                                                        isRefreshing={isRefreshing}
-                                                    />
-                                                </div>
-                                            )
-                                        )}
-
-
-
-                                    </div>
                                 </div>
                             </section>
 
@@ -952,7 +783,7 @@ const Launcher: React.FC<LauncherProps> = ({ onStartMeeting, onOpenSettings, onP
                                         {meetings.length === 0 && (
                                             <div className="flex flex-col items-center justify-center py-14 gap-3 text-center">
                                                 <div className={`w-12 h-12 rounded-full flex items-center justify-center ${isLight ? 'bg-bg-elevated border border-border-muted' : 'bg-white/[0.03] border border-white/5'}`}>
-                                                    <Calendar size={20} className="text-text-tertiary" />
+                                                    <Clock size={20} className="text-text-tertiary" />
                                                 </div>
                                                 <div>
                                                     <h3 className="text-[14px] font-semibold text-text-primary">No meetings yet</h3>

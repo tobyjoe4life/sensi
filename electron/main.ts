@@ -2797,102 +2797,24 @@ async function initializeApp() {
     }, 800);
   }
 
-  // Initialize CalendarManager
+  // PersonaManager — owns user_persona table and extraction pipeline.
+  // Binds to the live DB handle + a function that resolves the active
+  // LLMHelper so the persona's resume-extract call routes through
+  // whichever provider the user has configured.
   try {
-    const { CalendarManager } = require('./services/CalendarManager');
-    const calMgr = CalendarManager.getInstance();
-    calMgr.init();
-
-    // sensi M8 / PASS B: forward CalendarManager's internal connection
-    // events to every renderer so the Calendar settings panel reflects
-    // real-time changes (e.g. after sensi sign-in auto-connects Google).
-    calMgr.on('connection-changed', (_connected: boolean) => {
-      try {
-        const status = calMgr.getConnectionStatus();
-        for (const win of BrowserWindow.getAllWindows()) {
-          if (!win.isDestroyed()) {
-            win.webContents.send('calendar-connection-changed', status);
-          }
-        }
-      } catch (err) {
-        console.warn('[Main] calendar-connection-changed broadcast failed:', (err as Error)?.message);
-      }
-    });
-
-    // sensi M8 / PASS B: when sensi-cloud sign-in completes, adopt the
-    // bundled Google OAuth tokens so Calendar is instantly connected —
-    // no second OAuth consent required.
-    try {
-      const { AuthManager } = require('./services/AuthManager') as typeof import('./services/AuthManager');
-      AuthManager.getInstance().on('signed-in', (evt: { hasGoogleTokens: boolean }) => {
-        if (!evt?.hasGoogleTokens) return;
-        const creds = CredentialsManager.getInstance();
-        const accessToken = creds.getGoogleAccessToken();
-        const accessExpiresAt = creds.getGoogleAccessExpiresAt();
-        const refreshToken = creds.getGoogleRefreshToken();
-        if (!accessToken || !accessExpiresAt) return;
-        try {
-          calMgr.adoptGoogleOAuthTokens({
-            accessToken,
-            accessExpiresAt,
-            refreshToken,
-          });
-          console.log('[Main] Calendar auto-connected via sensi sign-in');
-        } catch (e) {
-          console.warn('[Main] adoptGoogleOAuthTokens failed:', (e as Error)?.message);
-        }
-      });
-      // Clear Calendar state on sign-out so the user isn't left with a
-      // connected-looking calendar that can't refresh its token.
-      AuthManager.getInstance().on('signed-out', () => {
-        void calMgr.disconnect();
-      });
-    } catch (e) {
-      console.warn('[Main] Could not wire AuthManager → CalendarManager bridge:', (e as Error)?.message);
-    }
-
-    calMgr.on('open-requested', () => {
-      appState.centerAndShowWindow();
-    });
-
-    // sensi M7 / PERSONA-01 (v2.10.0): PersonaManager — owns user_persona
-    // table and extraction pipeline. Binds to the live DB handle + a
-    // function that resolves the active LLMHelper so the persona's
-    // resume-extract call routes through whichever provider the user
-    // has configured.
-    try {
-      const { PersonaManager } = require('./persona/PersonaManager') as typeof import('./persona/PersonaManager');
-      const db = DatabaseManager.getInstance().getDb();
-      if (db) {
-        PersonaManager.getInstance().bind({
-          db: db as any,
-          llmHelperProvider: () => appState.processingHelper?.getLLMHelper?.() ?? null,
-        });
-        console.log('[Main] PersonaManager initialized');
-      } else {
-        console.warn('[Main] PersonaManager: DatabaseManager has no live handle yet');
-      }
-    } catch (err) {
-      console.error('[Main] Failed to initialize PersonaManager:', err);
-    }
-
-    // sensi M7 / PREP-01 (v2.12.0): PrepOrchestrator — composes a
-    // pre-meeting briefing from persona + JD + attached docs + Tavily
-    // research. Briefs are cached 24h per eventId; company research
-    // is cached 7d per company name.
-    try {
-      const { PrepOrchestrator } = require('./services/PrepOrchestrator') as typeof import('./services/PrepOrchestrator');
-      PrepOrchestrator.getInstance().bind({
+    const { PersonaManager } = require('./persona/PersonaManager') as typeof import('./persona/PersonaManager');
+    const db = DatabaseManager.getInstance().getDb();
+    if (db) {
+      PersonaManager.getInstance().bind({
+        db: db as any,
         llmHelperProvider: () => appState.processingHelper?.getLLMHelper?.() ?? null,
       });
-      console.log('[Main] PrepOrchestrator initialized');
-    } catch (err) {
-      console.error('[Main] Failed to initialize PrepOrchestrator:', err);
+      console.log('[Main] PersonaManager initialized');
+    } else {
+      console.warn('[Main] PersonaManager: DatabaseManager has no live handle yet');
     }
-
-    console.log('[Main] CalendarManager initialized');
-  } catch (e) {
-    console.error('[Main] Failed to initialize CalendarManager:', e);
+  } catch (err) {
+    console.error('[Main] Failed to initialize PersonaManager:', err);
   }
 
   // Recover unprocessed meetings (persistence check)

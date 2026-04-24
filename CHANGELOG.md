@@ -7,6 +7,44 @@ fetches from the GitHub release body, which is seeded from this file).
 
 ---
 
+## [2.17.3] — 2026-04-24
+
+Removes the Calendar / Upcoming Meetings surface entirely. Google's "this
+app isn't verified" interstitial fires whenever sign-in requests the
+sensitive `calendar.readonly` scope — rather than wait 3–6 weeks for
+Google's manual verification review, we strip the calendar feature and
+ship it back when the OAuth review clears.
+
+### Removed
+- **Cloud sign-in dropped `calendar.readonly`.** Identity-only flow now
+  (`openid` + `email` + `profile`) — no sensitive scopes, no unverified
+  warning, no test-user cap. (sensi-cloud `0.4.x`.)
+- **Upcoming Meetings panel** removed from the launcher hero.
+- **Pre-meeting briefing** ("Prep me" button + PrepOrchestrator + cached
+  briefs) — depended on calendar event IDs.
+- **Per-meeting JD attach** + per-meeting knowledge attach — depended on
+  calendar event IDs. Resume persona (PERSONA-01) is unchanged.
+- **BYO Calendar settings** (paste-your-own-OAuth-client flow in
+  Settings → Calendar) and `CalendarManager` deleted.
+- **Settings → Calendar tab** removed.
+
+### Code surface
+- Deleted: `electron/services/CalendarManager.ts`,
+  `electron/services/PrepOrchestrator.ts`,
+  `src/components/UpcomingMeetingsPanel.tsx`,
+  `src/components/PrepBriefingModal.tsx`,
+  `src/components/ui/ConnectCalendarButton.tsx`,
+  `src/components/settings/GoogleCalendarSettings.tsx`.
+- ~25 IPC handlers + preload bridges + electron.d.ts entries removed.
+- `AuthManager` + `CredentialsManager` no longer carry google access /
+  refresh token fields — sign-in callback handoff is sensi-only.
+
+### Coming back
+The Calendar / Upcoming Meetings surface returns once Google's OAuth
+verification review clears for sensi.
+
+---
+
 ## [2.17.2] — 2026-04-24
 
 Weight-loss release. Removes four unused surfaces and defers the syntax

@@ -177,7 +177,6 @@ interface ElectronAPI {
   // Follow-up Email
   generateFollowupEmail: (input: any) => Promise<string>
   extractEmailsFromTranscript: (transcript: Array<{ text: string }>) => Promise<string[]>
-  getCalendarAttendees: (eventId: string) => Promise<Array<{ email: string; name: string }>>
   openMailto: (params: { to: string; subject: string; body: string }) => Promise<{ success: boolean; error?: string }>
 
   // Audio Test
@@ -221,16 +220,6 @@ interface ElectronAPI {
   getThemeMode: () => Promise<{ mode: 'system' | 'light' | 'dark', resolved: 'light' | 'dark' }>
   setThemeMode: (mode: 'system' | 'light' | 'dark') => Promise<void>
   onThemeChanged: (callback: (data: { mode: 'system' | 'light' | 'dark', resolved: 'light' | 'dark' }) => void) => () => void
-
-  // Calendar
-  calendarConnect: () => Promise<{ success: boolean; error?: string }>
-  calendarDisconnect: () => Promise<{ success: boolean; error?: string }>
-  getCalendarStatus: () => Promise<{ connected: boolean; email?: string }>
-  getUpcomingEvents: () => Promise<Array<{ id: string; title: string; startTime: string; endTime: string; link?: string; source: 'google' }>>
-  calendarRefresh: () => Promise<{ success: boolean; error?: string }>
-  getGoogleOauthStatus: () => Promise<{ configured: boolean; maskedClientId: string | null }>
-  setGoogleOauthCredentials: (payload: { clientId: string; clientSecret: string }) => Promise<{ success: boolean; error?: string }>
-  clearGoogleOauthCredentials: () => Promise<{ success: boolean; error?: string }>
 
   getOnlineAssessmentModeEnabled: () => Promise<boolean>
   setOnlineAssessmentModeEnabled: (enabled: boolean) => Promise<{ success: boolean; error?: string }>
@@ -319,9 +308,6 @@ interface ElectronAPI {
   perfSetLowResource: (enabled: boolean) => Promise<{ success: boolean }>;
 
   onAuthStateChanged: (callback: (state: unknown) => void) => () => void;
-  onCalendarConnectionChanged: (
-    callback: (status: { connected: boolean; email?: string }) => void,
-  ) => () => void;
 
   researchRun: (query: string, scope?: 'company' | 'general') => Promise<{
     success: boolean;
@@ -365,21 +351,6 @@ interface ElectronAPI {
   personaUploadResume?: (filePath: string) => Promise<unknown>;
   personaGetSummary?: () => Promise<unknown>;
   personaClear?: () => Promise<unknown>;
-  // sensi M7 / PERSONA-02 — per-meeting JD binding
-  personaPickJDFile?: () => Promise<unknown>;
-  personaUploadJD?: (filePath: string, eventId: string) => Promise<unknown>;
-  personaGetJDForEvent?: (eventId: string) => Promise<unknown>;
-  personaClearJD?: (eventId: string) => Promise<unknown>;
-  // sensi M7 / PREP-01 — pre-meeting briefing
-  prepGetBriefing?: (payload: { eventId: string; title: string; description?: string; force?: boolean }) => Promise<unknown>;
-  prepInvalidate?: (eventId: string) => Promise<unknown>;
-
-  // sensi M7 / KNOWLEDGE-02 — per-meeting document binding
-  knowledgeAttachToEvent?: (docId: string, eventId: string) => Promise<{ success: boolean; error?: string }>;
-  knowledgeDetachFromEvent?: (docId: string, eventId: string) => Promise<{ success: boolean; error?: string }>;
-  knowledgeListForEvent?: (eventId: string) => Promise<{ success: boolean; documents?: unknown[]; error?: string }>;
-  knowledgeListEventsForDocument?: (docId: string) => Promise<{ success: boolean; eventIds?: string[]; error?: string }>;
-  knowledgeSuggestForEvent?: (eventId: string, searchText: string, topK?: number) => Promise<{ success: boolean; suggestions?: Array<{ document: unknown; distance: number }>; error?: string }>;
 
   // M5-T5 — Rolling-response trigger mode. Two RPCs + one broadcast.
   setRollingTriggerMode?: (mode: 'off' | 'on-silence' | 'on-demand') => Promise<unknown>;
@@ -965,7 +936,6 @@ contextBridge.exposeInMainWorld("electronAPI", {
   // Follow-up Email
   generateFollowupEmail: (input: any) => ipcRenderer.invoke('generate-followup-email', input),
   extractEmailsFromTranscript: (transcript: Array<{ text: string }>) => ipcRenderer.invoke('extract-emails-from-transcript', transcript),
-  getCalendarAttendees: (eventId: string) => ipcRenderer.invoke('get-calendar-attendees', eventId),
   openMailto: (params: { to: string; subject: string; body: string }) => ipcRenderer.invoke('open-mailto', params),
 
   // Audio Test
@@ -1042,17 +1012,6 @@ contextBridge.exposeInMainWorld("electronAPI", {
       ipcRenderer.removeListener('theme:changed', subscription)
     }
   },
-
-  // Calendar API
-  calendarConnect: () => ipcRenderer.invoke('calendar-connect'),
-  calendarDisconnect: () => ipcRenderer.invoke('calendar-disconnect'),
-  getCalendarStatus: () => ipcRenderer.invoke('get-calendar-status'),
-  getUpcomingEvents: () => ipcRenderer.invoke('get-upcoming-events'),
-  calendarRefresh: () => ipcRenderer.invoke('calendar-refresh'),
-  // v2.5.4: Google OAuth credential management
-  getGoogleOauthStatus: () => ipcRenderer.invoke('get-google-oauth-status'),
-  setGoogleOauthCredentials: (payload: { clientId: string; clientSecret: string }) => ipcRenderer.invoke('set-google-oauth-credentials', payload),
-  clearGoogleOauthCredentials: () => ipcRenderer.invoke('clear-google-oauth-credentials'),
 
   getOnlineAssessmentModeEnabled: () => ipcRenderer.invoke('get-online-assessment-mode-enabled'),
   setOnlineAssessmentModeEnabled: (enabled: boolean) => ipcRenderer.invoke('set-online-assessment-mode-enabled', enabled),
@@ -1230,13 +1189,6 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.on('auth-state-changed', sub);
     return () => ipcRenderer.removeListener('auth-state-changed', sub);
   },
-  onCalendarConnectionChanged: (
-    callback: (status: { connected: boolean; email?: string }) => void,
-  ) => {
-    const sub = (_: unknown, status: { connected: boolean; email?: string }) => callback(status);
-    ipcRenderer.on('calendar-connection-changed', sub);
-    return () => ipcRenderer.removeListener('calendar-connection-changed', sub);
-  },
 
   // Dynamic Model Discovery
   fetchProviderModels: (provider: 'gemini' | 'groq' | 'openai' | 'claude', apiKey: string) => ipcRenderer.invoke('fetch-provider-models', provider, apiKey),
@@ -1336,32 +1288,6 @@ contextBridge.exposeInMainWorld("electronAPI", {
   personaUploadResume: (filePath: string) => ipcRenderer.invoke('persona:upload-resume', filePath),
   personaGetSummary: () => ipcRenderer.invoke('persona:get-summary'),
   personaClear: () => ipcRenderer.invoke('persona:clear'),
-
-  // sensi M7 / PERSONA-02 — per-meeting JD binding
-  personaPickJDFile: () => ipcRenderer.invoke('persona:pick-jd-file'),
-  personaUploadJD: (filePath: string, eventId: string) =>
-    ipcRenderer.invoke('persona:upload-jd', filePath, eventId),
-  personaGetJDForEvent: (eventId: string) =>
-    ipcRenderer.invoke('persona:get-jd-for-event', eventId),
-  personaClearJD: (eventId: string) =>
-    ipcRenderer.invoke('persona:clear-jd', eventId),
-
-  // sensi M7 / PREP-01 — pre-meeting briefing
-  prepGetBriefing: (payload: { eventId: string; title: string; description?: string; force?: boolean }) =>
-    ipcRenderer.invoke('prep:get-briefing', payload),
-  prepInvalidate: (eventId: string) => ipcRenderer.invoke('prep:invalidate', eventId),
-
-  // sensi M7 / KNOWLEDGE-02 — per-meeting document binding
-  knowledgeAttachToEvent: (docId: string, eventId: string) =>
-    ipcRenderer.invoke('knowledge:attach-to-event', docId, eventId),
-  knowledgeDetachFromEvent: (docId: string, eventId: string) =>
-    ipcRenderer.invoke('knowledge:detach-from-event', docId, eventId),
-  knowledgeListForEvent: (eventId: string) =>
-    ipcRenderer.invoke('knowledge:list-for-event', eventId),
-  knowledgeListEventsForDocument: (docId: string) =>
-    ipcRenderer.invoke('knowledge:list-events-for-document', docId),
-  knowledgeSuggestForEvent: (eventId: string, searchText: string, topK?: number) =>
-    ipcRenderer.invoke('knowledge:suggest-for-event', eventId, searchText, topK ?? 3),
 
   // sensi M5-T5 — Rolling-response trigger mode (two channels, persisted via SettingsManager)
   setRollingTriggerMode: (mode: 'off' | 'on-silence' | 'on-demand') =>

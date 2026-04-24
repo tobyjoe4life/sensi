@@ -13,9 +13,7 @@ type BusyFlag = null | 'sign-in' | 'sign-out' | 'checkout' | 'portal' | 'refresh
  * sensi M8 / PASS B (v2.13.0) — Account tab.
  *
  * Surfaces sensi-cloud sign-in, subscription tier, and the daily usage meter.
- * Signed-in state doubles as the streamlined Google Calendar connection
- * (CalendarManager adopts the tokens in the background — see main.ts
- * wire-up), so users only complete one OAuth consent.
+ * Identity-only sign-in (no calendar scope) — see sensi-cloud/src/lib/config.ts.
  */
 export const AccountSettings: React.FC<AccountSettingsProps> = ({
     isLight,
@@ -109,7 +107,7 @@ export const AccountSettings: React.FC<AccountSettingsProps> = ({
         <div className="max-w-3xl">
             <h2 className={`text-xl font-semibold mb-1 ${headerText}`}>Account</h2>
             <p className={`text-sm mb-6 ${mutedText}`}>
-                Sign in to unlock Sensi AI, daily usage tracking, and one-click Google Calendar.
+                Sign in to unlock Sensi AI and daily usage tracking.
             </p>
 
             {error && (
@@ -162,7 +160,7 @@ function renderSignedOut({ onSignIn, onNavigateToAIProviders, busy, cardBase, mu
                 <div className="flex-1">
                     <h3 className="font-semibold mb-1">Sign in with Google</h3>
                     <p className={`text-sm ${mutedText}`}>
-                        Sensi AI included. Usage meter. One-click upgrade. Google Calendar connects in the same step.
+                        Sensi AI included. Usage meter. One-click upgrade.
                     </p>
                 </div>
             </div>
@@ -260,9 +258,6 @@ function renderSignedIn(state: SensiAuthStateIpc, deps: SignedInDeps) {
                         {me?.email && me.name && (
                             <p className={`text-sm ${mutedText} truncate`}>{me.email}</p>
                         )}
-                        <p className="text-xs text-emerald-400 flex items-center gap-1 mt-1">
-                            <CheckCircle size={12} /> Google Calendar connected
-                        </p>
                     </div>
                     <button
                         onClick={onRefresh}
