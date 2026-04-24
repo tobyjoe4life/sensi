@@ -82,12 +82,25 @@ export class RollingTriggerPolicy {
     private firedForCurrentSilenceAt: number | null = null;
 
     /**
-     * v2.15.0: Deepgram's UtteranceEnd event is the authoritative
-     * turn-end signal. When set, `shouldFireOnSilence()` returns the
-     * reason immediately instead of waiting for the silence timer.
-     * Reset when a new interviewer final segment is observed.
+     * v2.15.0: Deepgram's UtteranceEnd VAD signal — the speaker has stopped
+     * for `utterance_end_ms` (1.2 s). v2.17.5: this is now an INFORMATIONAL
+     * flag only. The fire decision still requires the silence detector to
+     * cross its full threshold (2.5 s default). Earlier versions short-
+     * circuited on UtteranceEnd, which fired prematurely on mid-sentence
+     * thinking pauses ("Tell me about… uh…"). Reset on next final segment.
      */
     private utteranceEndPending = false;
+
+    /**
+     * v2.17.5: timestamp (ms) of the last interim transcript segment from
+     * the interviewer. Used to suppress fires while the speaker is mid-
+     * burst (Deepgram emits interims even between finals). If the most
+     * recent interim is fresher than INTERIM_GUARD_MS, the speaker is
+     * actively talking and we must NOT fire — even if silence/UtteranceEnd
+     * say otherwise.
+     */
+    private lastInterimAt: number | null = null;
+    private static readonly INTERIM_GUARD_MS = 600;
 
     constructor(deps: RollingTriggerPolicyDeps = {}) {
         this.now = deps.now ?? Date.now;
@@ -136,10 +149,18 @@ export class RollingTriggerPolicy {
      * intended semantic).
      */
     noteSegment(opts: { isFinal: boolean; timestampMs?: number; speaker?: 'interviewer' | 'user' }): void {
-        if (!opts.isFinal) return;
-        // Default to 'interviewer' so pre-speaker-aware callers keep the
-        // original fire-on-silence behavior. Explicit 'user' opts out.
+        // v2.17.5: track interim activity from the interviewer so we can
+        // suppress fires while they're mid-burst. Interim segments still
+        // don't reset the silence detector (the file header rationale
+        // stands), but we do record their arrival time as an extra guard.
         const speaker = opts.speaker ?? 'interviewer';
+        if (!opts.isFinal) {
+            if (speaker === 'interviewer') {
+                this.lastInterimAt = opts.timestampMs ?? this.now();
+            }
+            return;
+        }
+        // Final segments — only the interviewer's count toward silence.
         if (speaker === 'user') return;
         const ts = opts.timestampMs ?? this.now();
         this.silenceDetector.noteFinalSegment(ts);
@@ -188,13 +209,24 @@ export class RollingTriggerPolicy {
         if (this.mode !== 'on-silence') return null;
         if (this.streamInFlight) return null;
         if (this.firedForCurrentSilenceAt !== null) return null;
-        // v2.15.0: prefer the VAD-driven UtteranceEnd signal when the
-        // STT provides it. Falls through to the silence timer for
-        // providers that don't (Google Speech, OpenAI STT).
-        if (this.utteranceEndPending) {
-            return { kind: 'on-silence' };
+        // v2.17.5: silence detector is the single source of truth for
+        // "speaker has stopped long enough." UtteranceEnd is now purely
+        // informational (kept on the policy for telemetry/debug). The
+        // earlier short-circuit on UtteranceEnd fired prematurely on
+        // mid-sentence thinking pauses because Deepgram's VAD emits
+        // UtteranceEnd after only 1.2 s of silence — well below the
+        // 2.5 s thinking-pause threshold the user actually wants.
+        const now = this.now();
+        if (!this.silenceDetector.isSilent(now)) return null;
+        // v2.17.5 interim guard: even if finals say silent, if Deepgram
+        // is still emitting interims for the interviewer (i.e. they're
+        // talking but the final hasn't landed yet), don't fire.
+        if (
+            this.lastInterimAt !== null &&
+            now - this.lastInterimAt < RollingTriggerPolicy.INTERIM_GUARD_MS
+        ) {
+            return null;
         }
-        if (!this.silenceDetector.isSilent(this.now())) return null;
         return { kind: 'on-silence' };
     }
 
@@ -232,6 +264,7 @@ export class RollingTriggerPolicy {
         this.streamInFlight = false;
         this.firedForCurrentSilenceAt = null;
         this.utteranceEndPending = false;
+        this.lastInterimAt = null;
         this.silenceDetector.reset();
     }
 

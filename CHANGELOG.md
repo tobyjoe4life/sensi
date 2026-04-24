@@ -7,6 +7,33 @@ fetches from the GitHub release body, which is seeded from this file).
 
 ---
 
+## [2.17.5] — 2026-04-25
+
+Auto-answer behaviour fixes — was firing while the interviewer was still
+talking, and the answers regurgitated the interviewer's words.
+
+### Fixed
+
+- **Fires while speaker still talking.** Deepgram's `UtteranceEnd` VAD
+  signal (1.2 s pause) was short-circuiting the silence detector and
+  firing the auto-answer on any mid-sentence thinking pause. The silence
+  detector (default 2.5 s) is now the single source of truth for "speaker
+  has stopped" — UtteranceEnd is purely informational. (`RollingTriggerPolicy.ts`)
+- **Interim guard.** Added a guard that suppresses fires while Deepgram is
+  still emitting interim transcripts for the interviewer (i.e. they're
+  talking but the final hasn't landed). 600 ms grace window.
+- **Regurgitation in answers.** The transcript cleaner used to lowercase
+  every line, which masked sentence boundaries the LLM relies on. Casing
+  is now preserved. Also stopped stripping `so` / `well` / `anyway` /
+  `actually` / `basically` — those are valid sentence openers in spoken
+  English. (`transcriptCleaner.ts`)
+- **Prompt clarity.** `UNIVERSAL_WHAT_TO_ANSWER_PROMPT` now explicitly
+  tells the model to answer ONLY the latest `[INTERVIEWER]` turn, never
+  echo the interviewer's words back, and respond `Take your time.` when
+  the latest interviewer turn is incomplete or fragmentary. (`prompts.ts`)
+
+---
+
 ## [2.17.4] — 2026-04-25
 
 Follow-up to 2.17.3 — fixes the stale Windows build that was published

@@ -9,12 +9,15 @@ export interface TranscriptTurn {
 }
 
 /**
- * Filler words and verbal acknowledgements to remove
+ * Filler words to remove. v2.17.5: removed `so`, `well`, `anyway`,
+ * `anyways`, `actually`, `basically` from this set — they're valid
+ * sentence openers in spoken English ("So, when I joined the team…")
+ * and stripping them turned questions into noise. We still strip
+ * filler `uh`/`um`/`like`/`i mean` etc. mid-sentence.
  */
 const FILLER_WORDS = new Set([
     'uh', 'um', 'ah', 'hmm', 'hm', 'er', 'erm',
-    'like', 'you know', 'i mean', 'basically', 'actually',
-    'so', 'well', 'anyway', 'anyways'
+    'like', 'you know', 'i mean'
 ]);
 
 const ACKNOWLEDGEMENTS = new Set([
@@ -24,19 +27,22 @@ const ACKNOWLEDGEMENTS = new Set([
 ]);
 
 /**
- * Clean a single turn's text
- * Removes fillers, acknowledgements, and cleans up formatting
+ * Clean a single turn's text. v2.17.5: stopped lowercasing the source —
+ * capitalization and sentence punctuation are signal the LLM uses to
+ * detect question boundaries. Filtering is now case-insensitive on the
+ * filler/acknowledgement check itself.
  */
 function cleanText(text: string): string {
-    let result = text.toLowerCase().trim();
+    let result = text.trim();
 
-    // Remove repeated words (yeah yeah, okay okay)
+    // Remove repeated words (yeah yeah, okay okay) — case-insensitive match,
+    // preserve original casing of the survivor.
     result = result.replace(/\b(\w+)(\s+\1)+\b/gi, '$1');
 
-    // Split into words and filter
+    // Split into words and filter (case-insensitive comparison)
     const words = result.split(/\s+/);
     const cleaned = words.filter(word => {
-        const normalized = word.replace(/[.,!?;:]/g, '');
+        const normalized = word.replace(/[.,!?;:]/g, '').toLowerCase();
         return !FILLER_WORDS.has(normalized) &&
             !ACKNOWLEDGEMENTS.has(normalized);
     });
