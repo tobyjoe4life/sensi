@@ -19,9 +19,11 @@ on:
         description: 'Git ref to build (branch, tag, or commit).'
         required: true
         default: 'replatform/sensi-minimax'
-  push:
-    tags:
-      - 'v*.*.*'
+  # NOTE: tag-push trigger removed (was: push.tags 'v*.*.*'). electron-builder
+  # publishes the v2.17.x tags pointing at an unrelated commit on main (legacy
+  # Natively era), which causes the tag-triggered run to build the wrong code
+  # and fail the asset-name match. The manual workflow_dispatch from
+  # replatform/sensi-minimax is the source of truth for Mac builds.
 
 jobs:
   build-mac:
