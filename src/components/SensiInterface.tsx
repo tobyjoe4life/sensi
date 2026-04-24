@@ -33,8 +33,10 @@ import {
     GitCompare
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
-import { oneLight, vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
+// PERF (v2.17.2): LazySyntaxHighlighter defers the ~250 KB gzipped Prism
+// grammar bundle until a code fence is actually rendered. Theme objects
+// stay static imports since they're ~1 KB literals.
+import { LazySyntaxHighlighter as SyntaxHighlighter, oneLight, vscDarkPlus } from './chat/LazySyntaxHighlighter';
 // import { ModelSelector } from './ui/ModelSelector'; // REMOVED
 import TopPill from './ui/TopPill';
 import RollingTranscript from './ui/RollingTranscript';

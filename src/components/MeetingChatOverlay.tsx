@@ -10,8 +10,8 @@ import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import 'katex/dist/katex.min.css';
-import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
-import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
+// PERF (v2.17.2): lazy-loaded Prism — see SensiInterface for rationale.
+import { LazySyntaxHighlighter as SyntaxHighlighter, vscDarkPlus } from './chat/LazySyntaxHighlighter';
 
 // ============================================
 // Types 

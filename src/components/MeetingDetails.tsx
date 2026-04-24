@@ -7,8 +7,8 @@ import EditableTextBlock from './EditableTextBlock';
 import { SensiMark } from './SensiLogoMark';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
-import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
+// PERF (v2.17.2): lazy-loaded Prism — see SensiInterface for rationale.
+import { LazySyntaxHighlighter as SyntaxHighlighter, vscDarkPlus } from './chat/LazySyntaxHighlighter';
 
 const formatTime = (ms: number) => {
     const date = new Date(ms);
