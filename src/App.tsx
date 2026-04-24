@@ -9,9 +9,6 @@ import SettingsOverlay from "./components/SettingsOverlay"
 import StartupSequence from "./components/StartupSequence"
 import { AnimatePresence, motion } from "framer-motion"
 import UpdateBanner from "./components/UpdateBanner"
-import { FreeTrialBanner }      from "./components/trial/FreeTrialBanner"
-import { FreeTrialModal }       from "./components/trial/FreeTrialModal"
-import { TrialPromoToaster }    from "./components/trial/TrialPromoToaster"
 import { PermissionsToaster }   from "./components/onboarding/PermissionsToaster"
 import { AlertCircle } from "lucide-react"
 import { clampOverlayOpacity, OVERLAY_OPACITY_DEFAULT, getDefaultOverlayOpacity } from "./lib/overlayAppearance"
@@ -88,16 +85,8 @@ const App: React.FC = () => {
   // API check
   const [hasNativelyApi, setHasNativelyApi] = useState<boolean>(false);
 
-  // ── Onboarding / promo toasters ───────────────────────────
+  // ── Onboarding toaster ────────────────────────────────────
   const [showPermissionsToaster, setShowPermissionsToaster] = useState(false);
-  const [showTrialPromo,         setShowTrialPromo]         = useState(false);
-
-  // ── Free Trial global state ────────────────────────────────
-  const [activeTrial, setActiveTrial] = useState<{
-    expiresAt: string;
-    usage: { ai: number; stt_seconds: number; search: number };
-  } | null>(null);
-  const [showTrialExpiredModal, setShowTrialExpiredModal] = useState(false);
 
   const isAppReady = !isSettingsWindow && !isOverlayWindow && !isModelSelectorWindow && !showStartup && !isSettingsOpen && isLauncherMainView;
   const { activeAd, dismissAd, previewAd } = useAdCampaigns(
@@ -166,15 +155,12 @@ const App: React.FC = () => {
     // startup calls were removed. Personal-use mode has no natively-cloud trial
     // and no trial UI — see DECISIONS.md D003 and src/lib/config.ts.
 
-    // ── Onboarding toasters ──────────────────────────────────
+    // ── Onboarding toaster ───────────────────────────────────
     if (isLauncherWindow || isDefault) {
       const permsShown = localStorage.getItem('natively_perms_shown_v1');
       if (!permsShown) {
         // First ever launch — show permissions toaster
         setShowPermissionsToaster(true);
-      } else {
-        // Subsequent launches — trial promo will self-gate via TrialPromoToaster
-        setShowTrialPromo(true);
       }
     }
 
@@ -414,7 +400,7 @@ const App: React.FC = () => {
                       setIsSettingsOpen(false);
                     }}
                     initialTab={settingsInitialTab}
-                    isTrialActive={!!activeTrial}
+                    isTrialActive={false}
                   />
                 </SignInGate>
                 <ToastViewport />
@@ -464,68 +450,15 @@ const App: React.FC = () => {
 
       <UpdateBanner />
 
-      {/* Free trial countdown banner — only in launcher window while trial is active */}
-      {!PERSONAL_USE && (isLauncherWindow || isDefault) && activeTrial && (
-        <FreeTrialBanner
-          expiresAt={activeTrial.expiresAt}
-          usage={activeTrial.usage}
-          onUpgrade={() => {
-            setSettingsInitialTab('api');
-            setIsSettingsOpen(true);
-          }}
-        />
-      )}
-
       {/* Permissions toaster — first ever launch */}
       <PermissionsToaster
         isOpen={showPermissionsToaster}
         onDismiss={() => {
           localStorage.setItem('natively_perms_shown_v1', '1');
           setShowPermissionsToaster(false);
-          // After permissions, allow trial promo on next launch
         }}
       />
 
-      {/* Trial promo toaster — 5s after restart (self-gates via localStorage + conditions) */}
-      {!PERSONAL_USE && (
-        <TrialPromoToaster
-          isOpen={showTrialPromo}
-          hasNativelyKey={hasNativelyApi}
-          hasTrialToken={!!activeTrial}
-          onDismiss={() => setShowTrialPromo(false)}
-          onStartTrial={async () => {
-            const res = await window.electronAPI?.startTrial?.();
-            if (!res?.ok) throw new Error(res?.error || 'Could not start trial');
-            if (res.expires_at) {
-              setActiveTrial({ expiresAt: res.expires_at, usage: res.usage ?? { ai: 0, stt_seconds: 0, search: 0 } });
-            }
-            setShowTrialPromo(false);
-          }}
-          onManualSetup={() => {
-            setShowTrialPromo(false);
-            setSettingsInitialTab('api');
-            setIsSettingsOpen(true);
-          }}
-        />
-      )}
-
-      {/* Post-trial upgrade modal — shown when trial expires */}
-      {!PERSONAL_USE && (isLauncherWindow || isDefault) && showTrialExpiredModal && (
-        <FreeTrialModal
-          usage={activeTrial?.usage ?? { ai: 0, stt_seconds: 0, search: 0 }}
-          onByok={async () => {
-            await window.electronAPI?.endTrialByok?.();
-          }}
-          onStandard={async () => {
-            // Wipe resume + JD (orchestrator caches + SQLite) before checkout opens
-            await window.electronAPI?.wipeTrialProfileData?.().catch(() => {});
-          }}
-          onDone={() => {
-            setShowTrialExpiredModal(false);
-            setActiveTrial(null);
-          }}
-        />
-      )}
       {/* Ad toasters — render whenever activeAd is set (isLauncherMainView guard bypassed
           when triggered via preview shortcut so the card always surfaces) */}
       {(isLauncherMainView || !!activeAd) && !isSettingsOpen && (
@@ -591,9 +524,6 @@ const App: React.FC = () => {
             .then(d => setPlanDetails(d ?? { isPremium: true }))
             .catch(() => setPlanDetails({ isPremium: true }));
           setShowPremiumModal(false);
-          // If user activated during post-trial modal, close it — they have a plan now
-          setShowTrialExpiredModal(false);
-          setActiveTrial(null);
           // After activation, open settings to Profile Intelligence
           setTimeout(() => {
             setSettingsInitialTab('profile');
