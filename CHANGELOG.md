@@ -7,6 +7,43 @@ fetches from the GitHub release body, which is seeded from this file).
 
 ---
 
+## [2.17.2] — 2026-04-24
+
+Weight-loss release. Removes four unused surfaces and defers the syntax
+highlighter out of the first-paint bundle. All strips are renderer-side;
+no behaviour change for live meetings, memory ingest, or the cloud API.
+
+### Removed
+- **Trial UI.** `FreeTrialBanner`, `FreeTrialModal`, `TrialPromoToaster`
+  deleted — all gated behind `PERSONAL_USE=true` since the fork and never
+  rendered. 3 files + ~400 LOC of state, effects, and handlers out of
+  `App.tsx`.
+- **Ad-campaign promo toasters.** Upgrade/retention campaign state
+  (`useAdCampaigns`, `PremiumUpgradeModal`, six toasters, Ctrl+Shift+1–5
+  preview hotkeys) removed from `App.tsx`. ~170 LOC net deletion.
+- **Process disguise mode.** The "masquerade as Terminal / System
+  Settings / Activity Monitor" option and its title/icon rewriters stripped
+  from main (`main.ts`, `WindowHelper`, `ipcHandlers`, `preload`,
+  `SettingsManager`) and renderer (`SettingsOverlay`, `AboutSection`,
+  `HelpSettings`). Undetectable Mode remains — only the identity-swap
+  layer on top is gone. ~290 LOC across 9 files.
+
+### Changed
+- **Syntax highlighter is now lazy.** `react-syntax-highlighter` (~250 KB
+  gzipped with Prism grammars) no longer ships in the initial renderer
+  chunk. First code fence in a chat response triggers a dynamic import;
+  plain text renders immediately via an unstyled `<pre><code>` fallback
+  while the chunk loads. Affects `SensiInterface`, `MeetingChatOverlay`,
+  `MeetingDetails` via a single new `LazySyntaxHighlighter` wrapper.
+
+### Performance
+- First-paint renderer chunk drops by the syntax-highlighter + grammars
+  bundle weight. Cold launcher paints faster on cold-cache starts.
+- App.tsx re-renders no longer carry trial/promo state — fewer effect
+  triggers on navigation and meeting-end events.
+
+---
+
 ## [2.12.0] — 2026-04-19
 
 ### Added — M7 / PREP-01: Pre-meeting briefing surface
