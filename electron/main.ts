@@ -241,7 +241,6 @@ export class AppState {
   private knowledgeOrchestrator: any = null
   private tray: Tray | null = null
   private updateAvailable: boolean = false
-  private disguiseMode: 'terminal' | 'settings' | 'activity' | 'none' = 'none'
 
   // View management
   private view: "queue" | "solutions" = "queue"
@@ -260,7 +259,6 @@ export class AppState {
   private meetingStartedAt: number | null = null; // v2.16.0: for STT usage-reporting
   private _isQuitting: boolean = false;
   private _verboseLogging: boolean = false;
-  private _disguiseTimers: NodeJS.Timeout[] = []; // Track forceUpdate timeouts
   private _dockDebounceTimer: NodeJS.Timeout | null = null; // Debounce dock state changes
   private _dockReassertTimers: NodeJS.Timeout[] = []; // Re-assert dock-hidden state after show+focus
   private _ollamaBootstrapPromise: Promise<void> | null = null;
@@ -299,10 +297,9 @@ export class AppState {
     }
 
     this.isUndetectable = settingsManager.get('isUndetectable') ?? false;
-    this.disguiseMode = settingsManager.get('disguiseMode') ?? 'none';
     this._verboseLogging = settingsManager.get('verboseLogging') ?? false;
     setVerboseLoggingFlag(this._verboseLogging);
-    console.log(`[AppState] Initialized with isUndetectable=${this.isUndetectable}, disguiseMode=${this.disguiseMode}, verboseLogging=${this._verboseLogging}`);
+    console.log(`[AppState] Initialized with isUndetectable=${this.isUndetectable}, verboseLogging=${this._verboseLogging}`);
 
     // 2. Initialize Helpers with loaded state
     this.windowHelper = new WindowHelper(this)
@@ -2406,15 +2403,6 @@ export class AppState {
     // Persist state via SettingsManager
     SettingsManager.getInstance().set('isUndetectable', state);
 
-    // Cancel all pending disguise timers to prevent their app.setName() calls
-    // from re-registering the dock icon after we hide it
-    if (state) {
-      for (const timer of this._disguiseTimers) {
-        clearTimeout(timer);
-      }
-      this._disguiseTimers = [];
-    }
-
     // Broadcast state change to all relevant windows
     this._broadcastToAllWindows('undetectable-changed', state);
 
@@ -2544,165 +2532,6 @@ export class AppState {
     this.broadcast('verbose-logging-changed', enabled);
   }
 
-  public setDisguise(mode: 'terminal' | 'settings' | 'activity' | 'none'): void {
-    this.disguiseMode = mode;
-    SettingsManager.getInstance().set('disguiseMode', mode);
-
-    // Apply the disguise regardless of undetectable state
-    // (disguise affects Activity Monitor name via process.title,
-    //  dock icon only updates when NOT in stealth)
-    this._applyDisguise(mode);
-  }
-
-  public applyInitialDisguise(): void {
-    this._applyDisguise(this.disguiseMode);
-  }
-
-  private _applyDisguise(mode: 'terminal' | 'settings' | 'activity' | 'none'): void {
-    let appName = "sensi";
-    let iconPath = "";
-
-    const isWin = process.platform === 'win32';
-    const isMac = process.platform === 'darwin';
-
-    switch (mode) {
-      case 'terminal':
-        appName = isWin ? "Command Prompt " : "Terminal ";
-        if (isWin) {
-          iconPath = app.isPackaged
-            ? path.join(process.resourcesPath, "assets/fakeicon/win/terminal.png")
-            : path.join(app.getAppPath(), "assets/fakeicon/win/terminal.png");
-        } else {
-          iconPath = app.isPackaged
-            ? path.join(process.resourcesPath, "assets/fakeicon/mac/terminal.png")
-            : path.join(app.getAppPath(), "assets/fakeicon/mac/terminal.png");
-        }
-        break;
-      case 'settings':
-        appName = isWin ? "Settings " : "System Settings ";
-        if (isWin) {
-          iconPath = app.isPackaged
-            ? path.join(process.resourcesPath, "assets/fakeicon/win/settings.png")
-            : path.join(app.getAppPath(), "assets/fakeicon/win/settings.png");
-        } else {
-          iconPath = app.isPackaged
-            ? path.join(process.resourcesPath, "assets/fakeicon/mac/settings.png")
-            : path.join(app.getAppPath(), "assets/fakeicon/mac/settings.png");
-        }
-        break;
-      case 'activity':
-        appName = isWin ? "Task Manager " : "Activity Monitor ";
-        if (isWin) {
-          iconPath = app.isPackaged
-            ? path.join(process.resourcesPath, "assets/fakeicon/win/activity.png")
-            : path.join(app.getAppPath(), "assets/fakeicon/win/activity.png");
-        } else {
-          iconPath = app.isPackaged
-            ? path.join(process.resourcesPath, "assets/fakeicon/mac/activity.png")
-            : path.join(app.getAppPath(), "assets/fakeicon/mac/activity.png");
-        }
-        break;
-      case 'none':
-        appName = "sensi";
-        if (isMac) {
-          iconPath = app.isPackaged
-            ? path.join(process.resourcesPath, "assets/icon.icns")
-            : path.join(app.getAppPath(), "assets/icon.icns");
-        } else if (isWin) {
-          iconPath = app.isPackaged
-            ? path.join(process.resourcesPath, "assets/icons/win/icon.ico")
-            : path.join(app.getAppPath(), "assets/icons/win/icon.ico");
-        } else {
-          iconPath = app.isPackaged
-            ? path.join(process.resourcesPath, "icon.png")
-            : path.join(app.getAppPath(), "assets/icon.png");
-        }
-        break;
-    }
-
-    console.log(`[AppState] Applying disguise: ${mode} (${appName}) on ${process.platform}`);
-
-    // 1. Update process title (affects Activity Monitor / Task Manager)
-    process.title = appName;
-
-    // 2. Update app name (affects macOS Menu / Dock)
-    // Skip when undetectable — app.setName() causes macOS to re-register
-    // the app and re-show the dock icon even after dock.hide()
-    if (!this.isUndetectable) {
-      app.setName(appName);
-    }
-
-    if (isMac) {
-      process.env.CFBundleName = appName.trim();
-    }
-
-    // 3. Update App User Model ID (Windows Taskbar grouping)
-    if (isWin) {
-      // Use unique AUMID per disguise to avoid grouping with the real app
-      app.setAppUserModelId(`com.tobyjoe.sensi.${mode}`);
-    }
-
-    // 4. Update Icons
-    if (fs.existsSync(iconPath)) {
-      const image = nativeImage.createFromPath(iconPath);
-
-      if (isMac) {
-        // Skip dock icon update when dock is hidden to avoid potential flicker
-        if (!this.isUndetectable) {
-          app.dock.setIcon(image);
-        }
-      } else {
-        // Windows/Linux: Update all window icons
-        this.windowHelper.getLauncherWindow()?.setIcon(image);
-        this.windowHelper.getOverlayWindow()?.setIcon(image);
-        this.settingsWindowHelper.getSettingsWindow()?.setIcon(image);
-      }
-    } else {
-      console.warn(`[AppState] Disguise icon not found: ${iconPath}`);
-    }
-
-    // 5. Update Window Titles
-    const launcher = this.windowHelper.getLauncherWindow();
-    if (launcher && !launcher.isDestroyed()) {
-      launcher.setTitle(appName.trim());
-      launcher.webContents.send('disguise-changed', mode);
-    }
-
-    const overlay = this.windowHelper.getOverlayWindow();
-    if (overlay && !overlay.isDestroyed()) {
-      overlay.setTitle(appName.trim());
-      overlay.webContents.send('disguise-changed', mode);
-    }
-
-    const settingsWin = this.settingsWindowHelper.getSettingsWindow();
-    if (settingsWin && !settingsWin.isDestroyed()) {
-      settingsWin.setTitle(appName.trim());
-      settingsWin.webContents.send('disguise-changed', mode);
-    }
-
-    // Cancel any stale forceUpdate timeouts from previous disguise changes
-    for (const timer of this._disguiseTimers) {
-      clearTimeout(timer);
-    }
-    this._disguiseTimers = [];
-
-    // Periodically re-assert process.title only — it can drift on some systems.
-    // NOTE: We intentionally do NOT call app.setName() here — it was already called
-    // synchronously above, and repeated calls on macOS cause the system to briefly
-    // show a second dock tile while re-registering the app identity.
-    const scheduleUpdate = (ms: number) => {
-      const ts = setTimeout(() => {
-        process.title = appName;
-        this._disguiseTimers = this._disguiseTimers.filter(t => t !== ts);
-      }, ms);
-      this._disguiseTimers.push(ts);
-    };
-
-    scheduleUpdate(200);
-    scheduleUpdate(1000);
-    scheduleUpdate(5000);
-  }
-
   // Helper: broadcast an IPC event to all windows
   private _broadcastToAllWindows(channel: string, ...args: any[]): void {
     const windows = [
@@ -2721,9 +2550,6 @@ export class AppState {
     }
   }
 
-  public getDisguise(): string {
-    return this.disguiseMode;
-  }
 }
 
 // Application initialization
@@ -2863,9 +2689,6 @@ async function initializeApp() {
 
   // Initialize IPC handlers before window creation
   initializeIpcHandlers(appState)
-
-  // Apply the full disguise payload (names, dock icon, AUMID) early
-  appState.applyInitialDisguise();
 
   // Start the Ollama lifecycle manager
   OllamaManager.getInstance().init().catch(console.error);

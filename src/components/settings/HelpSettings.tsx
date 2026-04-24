@@ -1537,10 +1537,10 @@ export const HelpSettings: React.FC<{ onNavigate?: (tab: string) => void }> = ({
                      <div className="space-y-4">
                         <div className="p-3 bg-indigo-500/10 border border-indigo-500/20 rounded-xl mb-4">
                             <h4 className="text-[13px] font-semibold text-indigo-400 flex items-center gap-2 mb-1">
-                                <Ghost size={14} /> Process Disguise & Undetectability
+                                <Ghost size={14} /> Undetectable Mode
                             </h4>
                             <p className="text-[11px] text-text-secondary leading-relaxed mb-0">
-                                sensi is heavily geared towards power users seeking minimalistic operation. The process completely disguises itself and remains undetectable/invisible to standard screen-recording applications and desktop sharing utilities.
+                                sensi is geared towards minimalistic operation. With Undetectable Mode on, the window is invisible to standard screen-recording and desktop-sharing applications.
                             </p>
                         </div>
 

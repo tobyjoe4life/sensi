@@ -566,11 +566,6 @@ export function initializeIpcHandlers(appState: AppState): void {
     return { success: true }
   })
 
-  safeHandle("set-disguise", async (_, mode: 'terminal' | 'settings' | 'activity' | 'none') => {
-    appState.setDisguise(mode)
-    return { success: true }
-  })
-
   // v2.16.2: expose the Windows-build-based stealth-capability probe so
   // the renderer can warn users whose OS cannot fully honour
   // Undetectable (Win10 pre-20H1 = modern screen-share still sees sensi).
@@ -630,10 +625,6 @@ export function initializeIpcHandlers(appState: AppState): void {
 
   safeHandle("get-overlay-mouse-passthrough", async () => {
     return appState.getOverlayMousePassthrough()
-  })
-
-  safeHandle("get-disguise", async () => {
-    return appState.getDisguise()
   })
 
   safeHandle("set-open-at-login", async (_, openAtLogin: boolean) => {
