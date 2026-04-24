@@ -725,7 +725,7 @@ export function initializeIpcHandlers(appState: AppState): void {
   // broadcast `llm-active-changed` to all open windows so the header pill
   // and any other listeners update in lockstep.
   // ─────────────────────────────────────────────────────────────────────
-  type ProviderId = 'minimax' | 'claude' | 'gemini' | 'groq' | 'openai' | 'ollama';
+  type ProviderId = 'claude' | 'gemini' | 'groq' | 'openai' | 'ollama';
   interface ProviderStatus {
     provider: ProviderId;
     configured: boolean;
@@ -734,7 +734,7 @@ export function initializeIpcHandlers(appState: AppState): void {
     activeModel: string | null;
     lastError?: string;
   }
-  const PROVIDER_ORDER: ProviderId[] = ['minimax', 'gemini', 'claude', 'openai', 'groq', 'ollama'];
+  const PROVIDER_ORDER: ProviderId[] = ['gemini', 'claude', 'openai', 'groq', 'ollama'];
 
   /**
    * Build a single ProviderStatus snapshot. Shared by the list and single
@@ -771,7 +771,6 @@ export function initializeIpcHandlers(appState: AppState): void {
       // static baseline registry plus the user's preferred-model override
       // (if it's not already in the baseline).
       const keyGetterMap: Record<Exclude<ProviderId, 'ollama'>, () => string | undefined> = {
-        minimax: () => cm.getMinimaxApiKey(),
         gemini:  () => cm.getGeminiApiKey(),
         claude:  () => cm.getClaudeApiKey(),
         openai:  () => cm.getOpenaiApiKey(),
@@ -1054,32 +1053,6 @@ export function initializeIpcHandlers(appState: AppState): void {
       return { success: true };
     } catch (error: any) {
       console.error("Error saving Claude API key:", error);
-      return { success: false, error: error.message };
-    }
-  });
-
-  // sensi M1 Step 3: MiniMax credential setter — mirrors set-gemini/groq/openai/claude.
-  // Persists via CredentialsManager (safeStorage-encrypted), then immediately rewires
-  // the runtime LLMHelper.minimaxClient so the user can switch to MiniMax in the same
-  // session without restarting the app. Passing an empty string clears both the
-  // stored key and the live client.
-  safeHandle("set-minimax-api-key", async (_, apiKey: string) => {
-    try {
-      const { CredentialsManager } = require('./services/CredentialsManager');
-      CredentialsManager.getInstance().setMinimaxApiKey(apiKey);
-
-      // Also update the LLMHelper immediately (passing null clears the client)
-      const llmHelper = appState.processingHelper.getLLMHelper();
-      llmHelper.setMinimaxApiKey(apiKey ? apiKey : null);
-
-      // CQ-06 fix: cancel in-flight stream before re-init (engine only, not session)
-      appState.getIntelligenceManager().resetEngine();
-      // Re-init IntelligenceManager
-      appState.getIntelligenceManager().initializeLLMs();
-
-      return { success: true };
-    } catch (error: any) {
-      console.error("Error saving MiniMax API key:", error);
       return { success: false, error: error.message };
     }
   });
@@ -1464,8 +1437,6 @@ export function initializeIpcHandlers(appState: AppState): void {
         hasOpenaiKey: hasKey(creds.openaiApiKey),
         hasClaudeKey: hasKey(creds.claudeApiKey),
         hasNativelyKey: hasKey(creds.nativelyApiKey),
-        // sensi M1 Step 3: MiniMax key presence flag, mirrors the other providers
-        hasMinimaxKey: hasKey(creds.minimaxApiKey),
         googleServiceAccountPath: creds.googleServiceAccountPath || null,
         sttProvider: creds.sttProvider || 'none',
         groqSttModel: creds.groqSttModel || 'whisper-large-v3-turbo',
@@ -1479,7 +1450,7 @@ export function initializeIpcHandlers(appState: AppState): void {
         ibmWatsonRegion: creds.ibmWatsonRegion || 'us-south',
         hasSonioxKey: hasKey(creds.sonioxApiKey),
         // STT key values — returned so the settings UI can pre-populate input fields.
-        // AI model keys (Gemini/Groq/OpenAI/Claude/MiniMax) remain boolean-only; STT keys are
+        // AI model keys (Gemini/Groq/OpenAI/Claude) remain boolean-only; STT keys are
         // surfaced here because users need to see which key is active when switching providers.
         sttGroqKey: creds.groqSttApiKey || '',
         sttOpenaiKey: creds.openAiSttApiKey || '',
@@ -1494,9 +1465,6 @@ export function initializeIpcHandlers(appState: AppState): void {
         groqPreferredModel: creds.groqPreferredModel || undefined,
         openaiPreferredModel: creds.openaiPreferredModel || undefined,
         claudePreferredModel: creds.claudePreferredModel || undefined,
-        // sensi M1 Step 3: MiniMax preferred model (set in Settings UI after the
-        // STANDARD_CLOUD_MODELS baseline list — see electron/shared/standardCloudModels.ts)
-        minimaxPreferredModel: creds.minimaxPreferredModel || undefined,
       };
     } catch (error: any) {
       return { hasGeminiKey: false, hasGroqKey: false, hasOpenaiKey: false, hasClaudeKey: false, hasNativelyKey: false, googleServiceAccountPath: null, sttProvider: 'none', groqSttModel: 'whisper-large-v3-turbo', hasSttGroqKey: false, hasSttOpenaiKey: false, hasDeepgramKey: false, hasElevenLabsKey: false, hasAzureKey: false, azureRegion: 'eastus', hasIbmWatsonKey: false, ibmWatsonRegion: 'us-south', hasSonioxKey: false, hasTavilyKey: false, sttGroqKey: '', sttOpenaiKey: '', sttDeepgramKey: '', sttElevenLabsKey: '', sttAzureKey: '', sttIbmKey: '', sttSonioxKey: '' };
@@ -1507,7 +1475,7 @@ export function initializeIpcHandlers(appState: AppState): void {
   // Dynamic Model Discovery Handlers
   // ==========================================
 
-  safeHandle("fetch-provider-models", async (_, provider: 'gemini' | 'groq' | 'openai' | 'claude' | 'minimax', apiKey: string) => {
+  safeHandle("fetch-provider-models", async (_, provider: 'gemini' | 'groq' | 'openai' | 'claude', apiKey: string) => {
     try {
       // Fall back to stored key if no key was explicitly provided
       let key = apiKey?.trim();
@@ -1518,26 +1486,10 @@ export function initializeIpcHandlers(appState: AppState): void {
         else if (provider === 'groq') key = cm.getGroqApiKey();
         else if (provider === 'openai') key = cm.getOpenaiApiKey();
         else if (provider === 'claude') key = cm.getClaudeApiKey();
-        // sensi M1 Step 3: MiniMax stored-key fallback
-        else if (provider === 'minimax') key = cm.getMinimaxApiKey();
       }
 
       if (!key) {
         return { success: false, error: 'No API key available. Please save a key first.' };
-      }
-
-      // sensi M1 Step 3: MiniMax uses the static baseline from
-      // electron/shared/standardCloudModels.ts rather than hitting a
-      // dynamic /v1/models endpoint. The baseline is curated and verified
-      // against MiniMax docs at the source. Dynamic discovery is M2+ work.
-      if (provider === 'minimax') {
-        const { STANDARD_CLOUD_MODELS } = require('./shared/standardCloudModels');
-        const entry = STANDARD_CLOUD_MODELS.minimax;
-        const models = entry.ids.map((id: string, i: number) => ({
-          id,
-          label: entry.names[i] || id,
-        }));
-        return { success: true, models };
       }
 
       const { fetchProviderModels } = require('./utils/modelFetcher');
@@ -1550,7 +1502,7 @@ export function initializeIpcHandlers(appState: AppState): void {
     }
   });
 
-  safeHandle("set-provider-preferred-model", async (_, provider: 'gemini' | 'groq' | 'openai' | 'claude' | 'minimax', modelId: string) => {
+  safeHandle("set-provider-preferred-model", async (_, provider: 'gemini' | 'groq' | 'openai' | 'claude', modelId: string) => {
     try {
       const { CredentialsManager } = require('./services/CredentialsManager');
       CredentialsManager.getInstance().setPreferredModel(provider, modelId);
@@ -1935,7 +1887,7 @@ export function initializeIpcHandlers(appState: AppState): void {
     }
   });
 
-  safeHandle("test-llm-connection", async (_, provider: 'gemini' | 'groq' | 'openai' | 'claude' | 'minimax', apiKey?: string) => {
+  safeHandle("test-llm-connection", async (_, provider: 'gemini' | 'groq' | 'openai' | 'claude', apiKey?: string) => {
     console.log(`[IPC] Received test-llm-connection request for provider: ${provider}`);
     try {
       if (!apiKey || !apiKey.trim()) {
@@ -1945,8 +1897,6 @@ export function initializeIpcHandlers(appState: AppState): void {
         else if (provider === 'groq') apiKey = creds.getGroqApiKey();
         else if (provider === 'openai') apiKey = creds.getOpenaiApiKey();
         else if (provider === 'claude') apiKey = creds.getClaudeApiKey();
-        // sensi M1 Step 3: MiniMax stored-key fallback
-        else if (provider === 'minimax') apiKey = creds.getMinimaxApiKey();
       }
 
       if (!apiKey || !apiKey.trim()) {
@@ -1991,19 +1941,6 @@ export function initializeIpcHandlers(appState: AppState): void {
             'anthropic-version': '2023-06-01',
             'content-type': 'application/json'
           },
-          timeout: 15000
-        });
-      } else if (provider === 'minimax') {
-        // sensi M1 Step 3: validate MiniMax via its OpenAI-compatible endpoint.
-        // Base URL verified 2026-04-13 from
-        // https://platform.minimax.io/docs/api-reference/text-openai-api
-        // Model ID kept in sync with MINIMAX_DEFAULT_MODEL in electron/LLMHelper.ts
-        // (see also electron/shared/standardCloudModels.ts).
-        response = await axios.post('https://api.minimax.io/v1/chat/completions', {
-          model: "MiniMax-M2.7",
-          messages: [{ role: "user", content: "Hello" }]
-        }, {
-          headers: { Authorization: `Bearer ${apiKey}` },
           timeout: 15000
         });
       }

@@ -9,11 +9,8 @@ import type { ProviderId, ProviderStatus } from '@providers/types';
  * Replaces the flat list with a vertical grouped layout:
  *
  *   ┌─────────────────────┐
- *   │ MiniMax             │  ← provider header (non-clickable)
- *   │  ◉ MiniMax M2.7     │  ← active model = filled dot + check
- *   │  ○ MiniMax HighSpd  │
- *   │ Gemini              │
- *   │  ○ 3.1 Flash        │
+ *   │ Gemini              │  ← provider header (non-clickable)
+ *   │  ◉ 3.1 Flash        │  ← active model = filled dot + check
  *   │  ○ 3.1 Pro          │
  *   │ Ollama (local)      │
  *   │  ○ ollama-llama3.2  │
@@ -111,7 +108,6 @@ const ModelSelectorWindow = () => {
     // doesn't need to import the registry just for label strings.
     const PROVIDER_LABELS: Record<ProviderId, string> = {
         'sensi-managed': 'Sensi AI',
-        minimax: 'MiniMax',
         gemini:  'Gemini',
         claude:  'Claude',
         openai:  'OpenAI',
@@ -122,8 +118,6 @@ const ModelSelectorWindow = () => {
     // Pretty-print the model ID. For ollama-* IDs, strip the prefix for display.
     const prettyModel = (id: string): string => {
         if (id.startsWith('ollama-')) return id.replace(/^ollama-/, '');
-        // Tidy MiniMax variants
-        if (id.startsWith('MiniMax-')) return id.replace(/^MiniMax-/, '');
         return id;
     };
 

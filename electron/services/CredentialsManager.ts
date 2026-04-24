@@ -62,10 +62,6 @@ export interface StoredCredentials {
     groqPreferredModel?: string;
     openaiPreferredModel?: string;
     claudePreferredModel?: string;
-    // sensi M1 Step 3: MiniMax credential slot. Stored alongside other
-    // provider keys in the safeStorage-encrypted credentials.enc file.
-    minimaxApiKey?: string;
-    minimaxPreferredModel?: string;
     // sensi M1 Step 4: session-active provider. The active model is reused from
     // the existing `defaultModel` field above, so only the provider key is new.
     // The pair is set together via setActiveProviderAndModel() so they cannot drift.
@@ -220,13 +216,6 @@ export class CredentialsManager {
 
     public getNativelyApiKey(): string | undefined {
         return this.credentials.nativelyApiKey;
-    }
-
-    // sensi M1 Step 3: MiniMax credential getter — mirrors the other cloud
-    // providers. Encryption is handled by the central save/load path; no
-    // per-key crypto needed here.
-    public getMinimaxApiKey(): string | undefined {
-        return this.credentials.minimaxApiKey;
     }
 
     public getAllCredentials(): StoredCredentials {
@@ -431,19 +420,6 @@ export class CredentialsManager {
         console.log('[CredentialsManager] Claude API Key updated');
     }
 
-    // sensi M1 Step 3: MiniMax credential setter. Stores undefined (not
-    // empty string) when the user clears the key, so `hasKey()` checks in
-    // the IPC layer stay consistent with the other providers. The
-    // accompanying IPC handler (`set-minimax-api-key`) also calls
-    // `LLMHelper.setMinimaxApiKey()` so the runtime client picks up the
-    // change without a restart.
-    public setMinimaxApiKey(key: string): void {
-        const trimmed = (key ?? '').trim();
-        this.credentials.minimaxApiKey = trimmed || undefined;
-        this.saveCredentials();
-        console.log('[CredentialsManager] MiniMax API Key updated');
-    }
-
     public setGoogleServiceAccountPath(filePath: string): void {
         this.credentials.googleServiceAccountPath = filePath;
         this.saveCredentials();
@@ -580,15 +556,12 @@ export class CredentialsManager {
         console.log('[CredentialsManager] Natively API Key updated');
     }
 
-    // sensi M1 Step 3: extended provider union to include 'minimax'.
-    // The string-keyed lookup (`${provider}PreferredModel`) maps to the
-    // matching `minimaxPreferredModel` field on `StoredCredentials`.
-    public getPreferredModel(provider: 'gemini' | 'groq' | 'openai' | 'claude' | 'minimax'): string | undefined {
+    public getPreferredModel(provider: 'gemini' | 'groq' | 'openai' | 'claude'): string | undefined {
         const key = `${provider}PreferredModel` as keyof StoredCredentials;
         return this.credentials[key] as string | undefined;
     }
 
-    public setPreferredModel(provider: 'gemini' | 'groq' | 'openai' | 'claude' | 'minimax', modelId: string): void {
+    public setPreferredModel(provider: 'gemini' | 'groq' | 'openai' | 'claude', modelId: string): void {
         const key = `${provider}PreferredModel` as keyof StoredCredentials;
         (this.credentials as any)[key] = modelId;
         this.saveCredentials();
@@ -656,7 +629,7 @@ export class CredentialsManager {
             const stored = this.credentials.defaultModel;
             return stored && stored.startsWith('ollama-') ? stored : null;
         }
-        const preferred = this.getPreferredModel(provider as 'gemini' | 'groq' | 'openai' | 'claude' | 'minimax');
+        const preferred = this.getPreferredModel(provider as 'gemini' | 'groq' | 'openai' | 'claude');
         if (preferred) return preferred;
         const entry = STANDARD_CLOUD_MODELS[provider as keyof typeof STANDARD_CLOUD_MODELS];
         return entry?.ids?.[0] ?? null;

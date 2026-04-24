@@ -2557,7 +2557,6 @@ Provide only the answer, nothing else.`;
                                                     if (!providerPairLoaded) return 'Loading…';
                                                     if (!currentProvider && !currentModel) return 'No provider';
                                                     const PROVIDER_LABELS: Record<string, string> = {
-                                                        minimax: 'MiniMax',
                                                         gemini:  'Gemini',
                                                         claude:  'Claude',
                                                         openai:  'OpenAI',
@@ -2567,7 +2566,6 @@ Provide only the answer, nothing else.`;
                                                     const m = currentModel;
                                                     let modelLabel = m;
                                                     if (m.startsWith('ollama-')) modelLabel = m.replace('ollama-', '');
-                                                    else if (m.startsWith('MiniMax-')) modelLabel = m.replace('MiniMax-', 'M').replace('-highspeed', ' fast');
                                                     else if (m === 'gemini-3.1-flash-lite-preview') modelLabel = '3.1 Flash';
                                                     else if (m === 'gemini-3.1-pro-preview') modelLabel = '3.1 Pro';
                                                     else if (m === 'llama-3.3-70b-versatile') modelLabel = 'Llama 3.3';

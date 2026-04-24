@@ -85,17 +85,6 @@ export class ProcessingHelper {
       this.llmHelper.setNativelyKey(nativelyKey);
     }
 
-    // sensi M1 Step 3: restore MiniMax client across restarts. Always call
-    // setMinimaxApiKey so the client is correctly cleared when the user has
-    // removed their key — passing null is the documented "clear" path.
-    const minimaxKey = credManager.getMinimaxApiKey();
-    if (minimaxKey) {
-      console.log("[ProcessingHelper] Loading stored MiniMax API Key from CredentialsManager");
-      this.llmHelper.setMinimaxApiKey(minimaxKey);
-    } else {
-      this.llmHelper.setMinimaxApiKey(null);
-    }
-
     // CRITICAL: Re-initialize IntelligenceManager now that keys are loaded
     // This fixes the issue where buttons don't work in production because of late key loading
     this.appState.getIntelligenceManager().initializeLLMs();

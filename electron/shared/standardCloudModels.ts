@@ -21,14 +21,12 @@
  */
 
 export type ProviderKey =
-    | 'minimax'
     | 'gemini'
     | 'openai'
     | 'claude'
     | 'groq';
 
 export type PreferredModelKey =
-    | 'minimaxPreferredModel'
     | 'geminiPreferredModel'
     | 'openaiPreferredModel'
     | 'claudePreferredModel'
@@ -52,30 +50,6 @@ export interface CloudModelRegistryEntry {
 }
 
 export const STANDARD_CLOUD_MODELS: Record<ProviderKey, CloudModelRegistryEntry> = {
-    minimax: {
-        hasKeyCheck: (creds) => !!creds?.hasMinimaxKey,
-        // sensi M1 Step 2: verified 2026-04-13 from
-        // https://platform.minimax.io/docs/api-reference/text-openai-api
-        // (OpenAI-compatible endpoint, base URL https://api.minimax.io/v1).
-        //
-        // `MiniMax-M2.7` is the current flagship (~60 tok/s, 204,800-token
-        // context). `MiniMax-M2.7-highspeed` is the low-latency variant
-        // (~100 tok/s, same context, identical capability per MiniMax).
-        //
-        // IMPORTANT: MiniMax's OpenAI-compat interface does NOT support
-        // image or audio inputs — vision requests are dropped by the
-        // streamChat dispatch branch. Do NOT describe these models as
-        // "Vision-capable" in the renderer UI.
-        //
-        // When MiniMax publishes newer model IDs, update this list and
-        // `MINIMAX_DEFAULT_MODEL` in electron/LLMHelper.ts together. The
-        // classifier `isMiniMaxModel` matches `MiniMax-*` and `abab*`
-        // prefixes (case-insensitive).
-        ids: ['MiniMax-M2.7', 'MiniMax-M2.7-highspeed'],
-        names: ['MiniMax M2.7', 'MiniMax M2.7 High-Speed'],
-        descs: ['Text flagship • 204k ctx', 'Fast tier • 204k ctx'],
-        pmKey: 'minimaxPreferredModel',
-    },
     gemini: {
         hasKeyCheck: (creds) => !!creds?.hasGeminiKey,
         ids: ['gemini-3.1-flash-lite-preview', 'gemini-3.1-pro-preview'],

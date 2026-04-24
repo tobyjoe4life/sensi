@@ -113,8 +113,6 @@ export const AIProvidersSettings: React.FC = () => {
     const [groqApiKey, setGroqApiKey] = useState('');
     const [openaiApiKey, setOpenaiApiKey] = useState('');
     const [claudeApiKey, setClaudeApiKey] = useState('');
-    // sensi M1 Step 3: MiniMax local input state, mirrors the other cloud providers
-    const [minimaxApiKey, setMinimaxApiKey] = useState('');
 
     // Status
     const [savedStatus, setSavedStatus] = useState<Record<string, boolean>>({});
@@ -173,8 +171,6 @@ export const AIProvidersSettings: React.FC = () => {
                         openai: creds.hasOpenaiKey,
                         claude: creds.hasClaudeKey,
                         natively: creds.hasNativelyKey || false,
-                        // sensi M1 Step 3: MiniMax presence flag
-                        minimax: creds.hasMinimaxKey || false,
                     });
                     setHasStoredTavilyKey(!!creds.hasTavilyKey);
                     // Load preferred models
@@ -183,8 +179,6 @@ export const AIProvidersSettings: React.FC = () => {
                     if (creds.groqPreferredModel) pm.groq = creds.groqPreferredModel;
                     if (creds.openaiPreferredModel) pm.openai = creds.openaiPreferredModel;
                     if (creds.claudePreferredModel) pm.claude = creds.claudePreferredModel;
-                    // sensi M1 Step 3: MiniMax preferred model
-                    if (creds.minimaxPreferredModel) pm.minimax = creds.minimaxPreferredModel;
                     setPreferredModels(pm);
                 }
 
@@ -329,9 +323,6 @@ export const AIProvidersSettings: React.FC = () => {
             if (provider === 'openai') result = await window.electronAPI.setOpenaiApiKey(key);
             // @ts-ignore
             if (provider === 'claude') result = await window.electronAPI.setClaudeApiKey(key);
-            // sensi M1 Step 3: MiniMax save path
-            // @ts-ignore
-            if (provider === 'minimax') result = await window.electronAPI.setMinimaxApiKey(key);
 
             if (result && result.success) {
                 setSavedStatus(prev => ({ ...prev, [provider]: true }));
@@ -362,10 +353,6 @@ export const AIProvidersSettings: React.FC = () => {
             if (provider === 'openai') result = await window.electronAPI.setOpenaiApiKey('');
             // @ts-ignore
             if (provider === 'claude') result = await window.electronAPI.setClaudeApiKey('');
-            // sensi M1 Step 3: MiniMax clear path (passing empty string clears the stored key
-            // and the runtime LLMHelper.minimaxClient via the IPC handler)
-            // @ts-ignore
-            if (provider === 'minimax') result = await window.electronAPI.setMinimaxApiKey('');
 
             if (result && result.success) {
                 setHasStoredKey(prev => ({ ...prev, [provider]: false }));
@@ -406,8 +393,6 @@ export const AIProvidersSettings: React.FC = () => {
             groq: 'https://console.groq.com/keys',
             openai: 'https://platform.openai.com/api-keys',
             claude: 'https://console.anthropic.com/settings/keys',
-            // sensi M1 Step 3: MiniMax key console (verified 2026-04-13)
-            minimax: 'https://platform.minimax.io/user-center/basic-information/interface-key',
         };
         // @ts-ignore
         window.electronAPI?.openExternal(urls[provider]);
@@ -639,7 +624,7 @@ export const AIProvidersSettings: React.FC = () => {
                     <div className="flex items-center justify-between">
                         <div>
                             <h3 className="text-sm font-bold text-text-primary mb-1">Power user — bring your own key</h3>
-                            <p className="text-xs text-text-secondary mb-2">Use your own Gemini / OpenAI / Claude / Groq / MiniMax key instead of Sensi AI.</p>
+                            <p className="text-xs text-text-secondary mb-2">Use your own Gemini / OpenAI / Claude / Groq key instead of Sensi AI.</p>
                         </div>
                         <ChevronDown size={16} className="text-text-tertiary group-open:rotate-180 transition-transform" />
                     </div>
@@ -725,32 +710,6 @@ export const AIProvidersSettings: React.FC = () => {
                         keyPlaceholder="sk-ant-..."
                         keyUrl="https://console.anthropic.com/settings/keys"
                         onPreferredModelChange={(model) => setPreferredModels(prev => ({ ...prev, claude: model }))}
-                    />
-
-                    {/* sensi M1 Step 3 — MiniMax (text-only via OpenAI-compat endpoint).
-                        Routed through the existing ProviderCard pattern. The
-                        fetchProviderModels IPC returns the static MiniMax-M2.7 +
-                        MiniMax-M2.7-highspeed baseline from
-                        electron/shared/standardCloudModels.ts (no dynamic /v1/models
-                        call yet). Vision is NOT supported on this endpoint — see the
-                        warning in LLMHelper.streamChat() dispatch branch. */}
-                    <ProviderCard
-                        providerId="minimax"
-                        providerName="MiniMax"
-                        apiKey={minimaxApiKey}
-                        preferredModel={preferredModels.minimax}
-                        hasStoredKey={!!hasStoredKey.minimax}
-                        onKeyChange={setMinimaxApiKey}
-                        onSaveKey={async () => { await handleSaveKey('minimax', minimaxApiKey, setMinimaxApiKey); }}
-                        onRemoveKey={() => handleRemoveKey('minimax', setMinimaxApiKey)}
-                        onTestConnection={() => handleTestConnection('minimax', minimaxApiKey)}
-                        testStatus={testStatus.minimax || 'idle'}
-                        testError={testError.minimax}
-                        savingStatus={!!savingStatus.minimax}
-                        savedStatus={!!savedStatus.minimax}
-                        keyPlaceholder="MiniMax API key..."
-                        keyUrl="https://platform.minimax.io/user-center/basic-information/interface-key"
-                        onPreferredModelChange={(model) => setPreferredModels(prev => ({ ...prev, minimax: model }))}
                     />
 
                 </div>

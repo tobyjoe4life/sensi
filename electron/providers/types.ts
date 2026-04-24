@@ -30,7 +30,6 @@
  */
 export type ProviderId =
     | 'sensi-managed'
-    | 'minimax'
     | 'claude'
     | 'gemini'
     | 'groq'
