@@ -242,14 +242,9 @@ interface ElectronAPI {
   setPreMeetingAlertsEnabled: (enabled: boolean) => Promise<{ success: boolean; error?: string }>
   getMeetingAutoDetectEnabled: () => Promise<boolean>
   setMeetingAutoDetectEnabled: (enabled: boolean) => Promise<{ success: boolean; error?: string }>
-  // M6-A: Live Coding mode
-  getLiveCodingModeEnabled: () => Promise<boolean>
-  setLiveCodingModeEnabled: (enabled: boolean) => Promise<{ success: boolean; error?: string }>
   getOnlineAssessmentModeEnabled: () => Promise<boolean>
   setOnlineAssessmentModeEnabled: (enabled: boolean) => Promise<{ success: boolean; error?: string }>
   onOnlineAssessmentModeChanged: (callback: (enabled: boolean) => void) => () => void
-  getLiveScreenCaptureRunning: () => Promise<boolean>
-  onLiveScreenCaptureRunning: (callback: (running: boolean) => void) => () => void
 
   // Auto-Update
   onUpdateAvailable: (callback: (info: any) => void) => () => void
@@ -1105,9 +1100,6 @@ contextBridge.exposeInMainWorld("electronAPI", {
   setPreMeetingAlertsEnabled: (enabled: boolean) => ipcRenderer.invoke('set-pre-meeting-alerts-enabled', enabled),
   getMeetingAutoDetectEnabled: () => ipcRenderer.invoke('get-meeting-auto-detect-enabled'),
   setMeetingAutoDetectEnabled: (enabled: boolean) => ipcRenderer.invoke('set-meeting-auto-detect-enabled', enabled),
-  // M6-A: Live Coding mode
-  getLiveCodingModeEnabled: () => ipcRenderer.invoke('get-live-coding-mode-enabled'),
-  setLiveCodingModeEnabled: (enabled: boolean) => ipcRenderer.invoke('set-live-coding-mode-enabled', enabled),
   getOnlineAssessmentModeEnabled: () => ipcRenderer.invoke('get-online-assessment-mode-enabled'),
   setOnlineAssessmentModeEnabled: (enabled: boolean) => ipcRenderer.invoke('set-online-assessment-mode-enabled', enabled),
   onOnlineAssessmentModeChanged: (callback: (enabled: boolean) => void) => {
@@ -1115,14 +1107,6 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.on('online-assessment-mode-changed', subscription);
     return () => {
       ipcRenderer.removeListener('online-assessment-mode-changed', subscription);
-    };
-  },
-  getLiveScreenCaptureRunning: () => ipcRenderer.invoke('get-live-screen-capture-running'),
-  onLiveScreenCaptureRunning: (callback: (running: boolean) => void) => {
-    const subscription = (_: any, running: boolean) => callback(running);
-    ipcRenderer.on('live-screen-capture-running', subscription);
-    return () => {
-      ipcRenderer.removeListener('live-screen-capture-running', subscription);
     };
   },
 

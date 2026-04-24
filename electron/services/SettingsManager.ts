@@ -30,11 +30,6 @@ export interface AppSettings {
     // (Zoom, Teams, Meet, etc.) sensi prompts with "Bring sensi? Yes/No".
     // Independent of the calendar-based pre-meeting alert. Default true.
     meetingAutoDetectEnabled?: boolean;
-    // M6-A v2.6.0: Live Coding mode — during meetings, take a full-screen
-    // snapshot every ~12s into a 3-frame ring buffer. Code Hint / What-to-
-    // answer auto-attach the latest frame, so the user can invoke a hint
-    // without Ctrl+H first. Off by default — tokens add up.
-    liveCodingModeEnabled?: boolean;
     // v2.6.2: Online Assessment mode — for LeetCode / HackerRank / coding
     // assessments done solo (no interviewer watching). When on, pressing
     // "What to answer?" takes a fresh screenshot and asks the LLM for a

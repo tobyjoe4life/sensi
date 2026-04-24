@@ -409,9 +409,6 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
     // v2.5.1: meeting auto-detect. When a Zoom/Teams/Meet app starts, sensi
     // prompts whether to come along. Independent of calendar-based alerts.
     const [meetingAutoDetect, setMeetingAutoDetect] = useState(true);
-    // M6-A v2.6.0: Live Coding mode — auto-attach latest screen to Code Hint /
-    // What-to-answer while a meeting is running. Off by default.
-    const [liveCodingMode, setLiveCodingMode] = useState(false);
     // v2.6.1: Interview Mode mirror in main Settings → General. Same backing
     // store as the overlay popup's Interview Mode toggle (actionButtonMode
     // 'recap' <-> 'brainstorm'). When on, the third quick-action chip swaps
@@ -494,7 +491,6 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
             }).catch(() => { });
             window.electronAPI?.getPreMeetingAlertsEnabled?.().then(setPreMeetingAlerts).catch(() => { });
             window.electronAPI?.getMeetingAutoDetectEnabled?.().then(setMeetingAutoDetect).catch(() => { });
-            window.electronAPI?.getLiveCodingModeEnabled?.().then(setLiveCodingMode).catch(() => { });
             window.electronAPI?.getOnlineAssessmentModeEnabled?.().then(setOnlineAssessmentMode).catch(() => { });
             // @ts-ignore — same API the overlay popup uses
             window.electronAPI?.getActionButtonMode?.().then((m: 'recap' | 'brainstorm') => {
@@ -1712,31 +1708,6 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                                 className={`w-11 h-6 rounded-full relative transition-colors cursor-pointer ${actionButtonMode === 'brainstorm' ? 'bg-violet-500' : 'bg-bg-toggle-switch border border-border-muted'}`}
                                             >
                                                 <div className={`absolute top-1 left-1 w-4 h-4 rounded-full bg-[#F1EDE6] shadow-[0_1px_2px_rgba(0,0,0,0.25)] transition-transform ${actionButtonMode === 'brainstorm' ? 'translate-x-5' : 'translate-x-0'}`} />
-                                            </div>
-                                        </div>
-
-                                        {/* M6-A v2.6.0: Live Coding mode. Auto-attaches latest screen frame to Code Hint / What-to-answer. */}
-                                        <div className={`${isLight ? 'bg-bg-card' : 'bg-bg-item-surface'} rounded-xl p-5 border border-border-subtle flex items-center justify-between transition-all ${liveCodingMode ? 'shadow-lg shadow-[var(--accent-primary)]/10' : ''}`}>
-                                            <div className="flex flex-col gap-1">
-                                                <div className="flex items-center gap-2">
-                                                    <Eye size={18} className={liveCodingMode ? 'text-[var(--accent-primary)]' : 'text-text-primary'} />
-                                                    <h3 className="text-lg font-bold text-text-primary">Live Coding mode</h3>
-                                                </div>
-                                                <p className="text-xs text-text-secondary">
-                                                    {liveCodingMode
-                                                        ? 'Sensi glances at your screen every ~12s during a meeting and auto-attaches the latest frame to your next Code Hint or What-to-answer. Saves you a Ctrl+H.'
-                                                        : 'Off: you must Ctrl+H manually before Code Hint / What-to-answer to include your screen. Enable for live technical interviews.'}
-                                                </p>
-                                            </div>
-                                            <div
-                                                onClick={() => {
-                                                    const newState = !liveCodingMode;
-                                                    setLiveCodingMode(newState);
-                                                    window.electronAPI?.setLiveCodingModeEnabled?.(newState).catch(() => { });
-                                                }}
-                                                className={`w-11 h-6 rounded-full relative transition-colors cursor-pointer ${liveCodingMode ? 'bg-[var(--accent-primary)]' : 'bg-bg-toggle-switch border border-border-muted'}`}
-                                            >
-                                                <div className={`absolute top-1 left-1 w-4 h-4 rounded-full bg-[#F1EDE6] shadow-[0_1px_2px_rgba(0,0,0,0.25)] transition-transform ${liveCodingMode ? 'translate-x-5' : 'translate-x-0'}`} />
                                             </div>
                                         </div>
 

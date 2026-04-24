@@ -280,14 +280,9 @@ export interface ElectronAPI {
   setPreMeetingAlertsEnabled: (enabled: boolean) => Promise<{ success: boolean; error?: string }>
   getMeetingAutoDetectEnabled: () => Promise<boolean>
   setMeetingAutoDetectEnabled: (enabled: boolean) => Promise<{ success: boolean; error?: string }>
-  // M6-A: Live Coding mode
-  getLiveCodingModeEnabled: () => Promise<boolean>
-  setLiveCodingModeEnabled: (enabled: boolean) => Promise<{ success: boolean; error?: string }>
   getOnlineAssessmentModeEnabled: () => Promise<boolean>
   setOnlineAssessmentModeEnabled: (enabled: boolean) => Promise<{ success: boolean; error?: string }>
   onOnlineAssessmentModeChanged: (callback: (enabled: boolean) => void) => () => void
-  getLiveScreenCaptureRunning: () => Promise<boolean>
-  onLiveScreenCaptureRunning: (callback: (running: boolean) => void) => () => void
 
   // Auto-Update
   onUpdateAvailable: (callback: (info: any) => void) => () => void

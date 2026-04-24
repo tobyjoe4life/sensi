@@ -2662,28 +2662,6 @@ export function initializeIpcHandlers(appState: AppState): void {
     }
   });
 
-  // ── M6-A: Live Coding mode (v2.6.0) ─────────────────────────────
-  safeHandle("set-live-coding-mode-enabled", async (_, enabled: boolean) => {
-    try {
-      const { SettingsManager } = require('./services/SettingsManager') as typeof import('./services/SettingsManager');
-      SettingsManager.getInstance().set('liveCodingModeEnabled', !!enabled);
-      const { LiveScreenCapture } = require('./services/LiveScreenCapture') as typeof import('./services/LiveScreenCapture');
-      LiveScreenCapture.getInstance().setEnabled(!!enabled);
-      return { success: true };
-    } catch (error: any) {
-      return { success: false, error: error?.message ?? 'failed to persist' };
-    }
-  });
-
-  safeHandle("get-live-coding-mode-enabled", async () => {
-    try {
-      const { SettingsManager } = require('./services/SettingsManager') as typeof import('./services/SettingsManager');
-      return SettingsManager.getInstance().get('liveCodingModeEnabled') ?? false;
-    } catch (error: any) {
-      return false;
-    }
-  });
-
   // ── v2.6.2: Online Assessment mode ──────────────────────────────
   // Solves the visible coding problem end-to-end with a fresh screenshot.
   // Independent of Live Coding: no continuous capture, no ring buffer.
@@ -2710,14 +2688,6 @@ export function initializeIpcHandlers(appState: AppState): void {
     }
   });
 
-  safeHandle("get-live-screen-capture-running", async () => {
-    try {
-      const { LiveScreenCapture } = require('./services/LiveScreenCapture') as typeof import('./services/LiveScreenCapture');
-      return LiveScreenCapture.getInstance().isRunning();
-    } catch (error: any) {
-      return false;
-    }
-  });
   // M6-A A3 (keybinds): existing `keybinds:get-all`/`keybinds:set`/`keybinds:reset`
   // channels + the renderer's KeyRecorder UI already cover this. No additional
   // handlers needed. See electron/services/KeybindManager.ts and src/hooks/useShortcuts.ts.

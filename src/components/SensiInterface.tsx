@@ -81,8 +81,6 @@ const SensiInterface: React.FC<SensiInterfaceProps> = ({ onEndMeeting, overlayOp
     const { shortcuts, isShortcutPressed } = useShortcuts();
     const [messages, setMessages] = useState<Message[]>([]);
     const [isConnected, setIsConnected] = useState(false);
-    // M6-A v2.6.0: Live Coding capture-running indicator for the overlay chip.
-    const [liveCaptureRunning, setLiveCaptureRunning] = useState(false);
     const [isProcessing, setIsProcessing] = useState(false);
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
     const [conversationContext, setConversationContext] = useState<string>('');
@@ -565,14 +563,6 @@ const SensiInterface: React.FC<SensiInterfaceProps> = ({ onEndMeeting, overlayOp
         cleanups.push(window.electronAPI.onNativeAudioDisconnected(() => {
             setIsConnected(false);
         }));
-
-        // M6-A v2.6.0: Live Coding capture state. Broadcast on start/stop.
-        window.electronAPI?.getLiveScreenCaptureRunning?.().then(setLiveCaptureRunning).catch(() => { });
-        if (window.electronAPI?.onLiveScreenCaptureRunning) {
-            cleanups.push(window.electronAPI.onLiveScreenCaptureRunning((running) => {
-                setLiveCaptureRunning(!!running);
-            }));
-        }
 
         // Real-time Transcripts
         cleanups.push(window.electronAPI.onNativeAudioTranscript((transcript) => {
@@ -2398,23 +2388,6 @@ Provide only the answer, nothing else.`;
                             appearance={appearance}
                             onLogoClick={() => window.electronAPI?.setWindowMode?.('launcher')}
                         />
-                        {/* v2.6.2 LIVE CODING chip — always visible when Live Coding capture is
-                            running so the user knows sensi is sampling their screen every ~12 s.
-                            Clicking opens Settings so the user can disable it. Explicit
-                            "Live Coding" text (not just "Live") so the feature is unambiguous. */}
-                        {liveCaptureRunning && (
-                            <button
-                                onClick={() => window.electronAPI?.toggleSettingsWindow?.()}
-                                title="Live Coding mode is capturing frames every ~12s. Click to open Settings."
-                                className="no-drag flex items-center gap-1.5 px-3 py-1 rounded-full border border-[var(--accent-primary)]/30 bg-[var(--accent-primary)]/[0.08] text-[9.5px] font-bold uppercase tracking-[0.18em] text-[var(--accent-primary)] hover:bg-[var(--accent-primary)]/[0.14] transition-colors"
-                            >
-                                <span className="relative flex items-center justify-center w-1.5 h-1.5">
-                                    <span className="absolute inset-0 rounded-full bg-[var(--accent-primary)] opacity-40 animate-ping" />
-                                    <span className="relative w-1 h-1 rounded-full bg-[var(--accent-primary)]" />
-                                </span>
-                                Live Coding
-                            </button>
-                        )}
                         <div
                             className={`relative w-[600px] max-w-full backdrop-blur-2xl border rounded-[24px] overflow-hidden flex flex-col draggable-area overlay-shell-surface ${overlayPanelClass}`}
                             style={appearance.shellStyle}

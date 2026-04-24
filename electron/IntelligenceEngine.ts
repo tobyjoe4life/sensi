@@ -320,31 +320,6 @@ export class IntelligenceEngine extends EventEmitter {
         return this.rollingPolicy;
     }
 
-    /**
-     * M6-A: auto-attach the most recent Live Coding frame if one exists,
-     * else undefined. Used by runWhatShouldISay and runCodeHint when the
-     * caller didn't provide explicit screenshots. Lazy-require to avoid a
-     * circular dependency on the LiveScreenCapture singleton.
-     */
-    private tryAttachLiveFrame(): string[] | undefined {
-        try {
-            // eslint-disable-next-line @typescript-eslint/no-require-imports
-            const { LiveScreenCapture } = require('./services/LiveScreenCapture') as typeof import('./services/LiveScreenCapture');
-            const frame = LiveScreenCapture.getInstance().getLatestFrame();
-            if (!frame) return undefined;
-            // Frame must still exist on disk — the ring buffer evicts files.
-            // eslint-disable-next-line @typescript-eslint/no-require-imports
-            const fs = require('fs') as typeof import('fs');
-            if (!fs.existsSync(frame.path)) return undefined;
-            const ageMs = Date.now() - frame.capturedAt;
-            console.log(`[IntelligenceEngine] attached live frame (${ageMs}ms old)`);
-            return [frame.path];
-        } catch (err) {
-            // Never let a missing/broken live-capture path break a normal Code Hint call
-            return undefined;
-        }
-    }
-
     getLLMHelper(): LLMHelper {
         return this.llmHelper;
     }
@@ -543,14 +518,6 @@ export class IntelligenceEngine extends EventEmitter {
      */
     async runWhatShouldISay(question?: string, confidence: number = 0.8, imagePaths?: string[]): Promise<string | null> {
         const now = Date.now();
-
-        // M6-A (v2.6.0): if the caller provided no screenshot AND Live Coding
-        // mode is capturing frames, auto-attach the most recent frame. Lets
-        // the user invoke Ctrl+1 without a manual Ctrl+H first. Silently
-        // skipped when Live Coding is off or the buffer is empty.
-        if (!imagePaths || imagePaths.length === 0) {
-            imagePaths = this.tryAttachLiveFrame();
-        }
 
         // Bypass cooldown when the user explicitly attached images (capture-and-process intent).
         // The cooldown exists to debounce auto-triggers, not explicit shortcuts with context.
@@ -1055,12 +1022,6 @@ export class IntelligenceEngine extends EventEmitter {
         if (this.assistCancellationToken) {
             this.assistCancellationToken.abort();
             this.assistCancellationToken = null;
-        }
-
-        // M6-A (v2.6.0): auto-attach latest live frame if caller has none.
-        // Key UX: "Ctrl+6 just works" even without a manual Ctrl+H first.
-        if (!imagePaths || imagePaths.length === 0) {
-            imagePaths = this.tryAttachLiveFrame();
         }
 
         this.setMode('code_hint');

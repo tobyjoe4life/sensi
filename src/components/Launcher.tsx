@@ -77,10 +77,6 @@ const formatTime = (dateStr: string) => {
 const Launcher: React.FC<LauncherProps> = ({ onStartMeeting, onOpenSettings, onPageChange, ollamaPullStatus = 'idle', ollamaPullPercent = 0, ollamaPullMessage = '' }) => {
     const [meetings, setMeetings] = useState<Meeting[]>([]);
     const [isDetectable, setIsDetectable] = useState(false);
-    // v2.6.1: mirror of SettingsManager.liveCodingModeEnabled so the launcher
-    // can show a "Live Coding" chip when the setting is armed (indicator is
-    // important because the feature silently samples the screen during meetings).
-    const [liveCodingModeEnabled, setLiveCodingModeEnabled] = useState(false);
     const [isMeetingActive, setIsMeetingActive] = useState(false);
     const [selectedMeeting, setSelectedMeeting] = useState<Meeting | null>(null);
     const [upcomingEvents, setUpcomingEvents] = useState<any[]>([]);
@@ -206,21 +202,6 @@ const Launcher: React.FC<LauncherProps> = ({ onStartMeeting, onOpenSettings, onP
             });
         }
 
-        // v2.6.1: initial Live Coding mode state. No change event broadcast yet
-        // (Settings writes directly to this process's store), so re-read when the
-        // launcher regains focus.
-        if (window.electronAPI?.getLiveCodingModeEnabled) {
-            window.electronAPI.getLiveCodingModeEnabled().then((enabled) => {
-                if (mounted) setLiveCodingModeEnabled(!!enabled);
-            }).catch(() => { });
-        }
-        const syncLiveCoding = () => {
-            window.electronAPI?.getLiveCodingModeEnabled?.().then((enabled) => {
-                if (mounted) setLiveCodingModeEnabled(!!enabled);
-            }).catch(() => { });
-        };
-        window.addEventListener('focus', syncLiveCoding);
-
         // Listen for undetectable changes
         let removeUndetectableListener: (() => void) | undefined;
         if (window.electronAPI?.onUndetectableChanged) {
@@ -261,7 +242,6 @@ const Launcher: React.FC<LauncherProps> = ({ onStartMeeting, onOpenSettings, onP
             if (removeMeetingsListener) removeMeetingsListener();
             if (removeUndetectableListener) removeUndetectableListener();
             if (removeMeetingStateListener) removeMeetingStateListener();
-            window.removeEventListener('focus', syncLiveCoding);
             clearInterval(interval);
         };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -612,20 +592,6 @@ const Launcher: React.FC<LauncherProps> = ({ onStartMeeting, onOpenSettings, onP
                                                 </div>
                                             </div>
 
-                                            {/* v2.6.1 Live Coding status chip. Visible whenever the Setting
-                                                is armed so the user knows sensi will sample their screen once a
-                                                meeting starts. In-meeting the overlay shows its own pulsing LIVE
-                                                pill; this chip is the pre-meeting mirror. */}
-                                            {liveCodingModeEnabled && (
-                                                <button
-                                                    onClick={() => onOpenSettings('general')}
-                                                    title="Live Coding mode is armed. Click to change."
-                                                    className={`flex items-center gap-1.5 border rounded-full px-3 py-1.5 transition-colors ${isLight ? 'bg-bg-elevated border-[var(--accent-primary)]/30 hover:bg-bg-item-surface' : 'bg-[var(--accent-primary)]/[0.08] border-[var(--accent-primary)]/25 hover:bg-[var(--accent-primary)]/[0.12]'}`}
-                                                >
-                                                    <Eye size={13} className="text-[var(--accent-primary)]" />
-                                                    <span className="text-[10.5px] font-bold uppercase tracking-[0.14em] text-[var(--accent-primary)]">Live Coding</span>
-                                                </button>
-                                            )}
                                         </div>
 
                                         {/* Center: Ollama Pull Status Pill (flex-1 to center evenly) */}

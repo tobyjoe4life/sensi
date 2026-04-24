@@ -548,14 +548,6 @@ export class AppState {
 
   private broadcastMeetingState(): void {
     this.broadcast('meeting-state-changed', { isActive: this.isMeetingActive });
-    // M6-A: inform LiveScreenCapture so it can start/stop its timer.
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const { LiveScreenCapture } = require('./services/LiveScreenCapture') as typeof import('./services/LiveScreenCapture');
-      LiveScreenCapture.getInstance().onMeetingStateChanged(this.isMeetingActive);
-    } catch (err) {
-      console.warn('[Main] LiveScreenCapture state update failed:', err);
-    }
   }
 
   private async bootstrapOllamaEmbeddings() {
@@ -3097,24 +3089,6 @@ async function initializeApp() {
       console.log('[Main] MeetingDetector initialized (enabled =', detectEnabled, ')');
     } catch (err) {
       console.error('[Main] Failed to initialize MeetingDetector:', err);
-    }
-
-    // M6-A v2.6.0: Live Coding mode — wire the screenshot fn + load the
-    // persisted enabled flag. Actual timer only runs while a meeting is
-    // active AND the flag is on, so binding here is cheap.
-    try {
-      const { LiveScreenCapture } = require('./services/LiveScreenCapture') as typeof import('./services/LiveScreenCapture');
-      const lsc = LiveScreenCapture.getInstance();
-      lsc.bindCaptureFn(() => appState.getScreenshotHelper().takeLiveFrame());
-      const liveEnabled = SettingsManager.getInstance().get('liveCodingModeEnabled') ?? false;
-      lsc.setEnabled(liveEnabled);
-      // Broadcast running state to renderer so the overlay can show a LIVE chip.
-      lsc.on('running', (running: boolean) => {
-        appState.broadcast('live-screen-capture-running', running);
-      });
-      console.log('[Main] LiveScreenCapture initialized (enabled =', liveEnabled, ')');
-    } catch (err) {
-      console.error('[Main] Failed to initialize LiveScreenCapture:', err);
     }
 
     // sensi M7 / MOTION-01 (v2.8.0): Motion Capture Manager — user-driven

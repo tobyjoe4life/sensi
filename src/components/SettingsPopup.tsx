@@ -171,13 +171,11 @@ const SettingsPopup = () => {
         return () => unsubscribe();
     }, []);
 
-    // v2.6.2: Live Coding + Online Assessment mirrors in the overlay popup.
-    // Both are backed by the same SettingsManager fields the main Settings
-    // → General panel uses, so they stay in sync cross-window.
-    const [liveCodingMode, setLiveCodingMode] = useState(false);
+    // v2.6.2: Online Assessment mirror in the overlay popup.
+    // Backed by the same SettingsManager field the main Settings → General
+    // panel uses so they stay in sync cross-window.
     const [assessmentMode, setAssessmentMode] = useState(false);
     useEffect(() => {
-        window.electronAPI?.getLiveCodingModeEnabled?.().then((v: boolean) => setLiveCodingMode(!!v)).catch(() => { });
         window.electronAPI?.getOnlineAssessmentModeEnabled?.().then((v: boolean) => setAssessmentMode(!!v)).catch(() => { });
     }, []);
     useEffect(() => {
@@ -356,27 +354,6 @@ const SettingsPopup = () => {
                         className={`w-[30px] h-[18px] rounded-full p-[1.5px] transition-all duration-300 ease-spring active:scale-[0.92] focus:outline-none focus-visible:ring-1 focus-visible:ring-emerald-500/40 ${actionButtonMode === 'brainstorm' ? 'bg-violet-500 shadow-[0_2px_10px_rgba(139,92,246,0.3)]' : defaultToggleTrackClass}`}
                     >
                         <div className={`w-[15px] h-[15px] rounded-full transition-transform duration-300 ease-spring ${toggleKnobClass} ${actionButtonMode === 'brainstorm' ? 'translate-x-[12px]' : 'translate-x-0'}`} />
-                    </button>
-                </div>
-
-                {/* v2.6.2: Live Coding Mode — mirrors Settings → General toggle. */}
-                <div className={`flex items-center justify-between px-3 py-2 rounded-lg transition-colors duration-200 group cursor-default ${itemHoverClass}`}>
-                    <div className="flex items-center gap-3">
-                        <Eye
-                            className={`w-3.5 h-3.5 transition-colors ${liveCodingMode ? 'text-[var(--accent-primary)]' : iconInactiveClass}`}
-                            fill={liveCodingMode ? 'currentColor' : 'none'}
-                        />
-                        <span className={`text-[12px] font-medium transition-colors ${liveCodingMode ? (isLightTheme ? 'text-slate-950' : 'text-white') : labelInactiveClass}`}>Live Coding</span>
-                    </div>
-                    <button
-                        onClick={async () => {
-                            const next = !liveCodingMode;
-                            setLiveCodingMode(next);
-                            try { await window.electronAPI?.setLiveCodingModeEnabled?.(next); } catch (e) { console.error(e); }
-                        }}
-                        className={`w-[30px] h-[18px] rounded-full p-[1.5px] transition-all duration-300 ease-spring active:scale-[0.92] focus:outline-none focus-visible:ring-1 focus-visible:ring-emerald-500/40 ${liveCodingMode ? 'bg-[var(--accent-primary)] shadow-[0_2px_10px_rgba(184,145,92,0.35)]' : defaultToggleTrackClass}`}
-                    >
-                        <div className={`w-[15px] h-[15px] rounded-full transition-transform duration-300 ease-spring ${toggleKnobClass} ${liveCodingMode ? 'translate-x-[12px]' : 'translate-x-0'}`} />
                     </button>
                 </div>
 
