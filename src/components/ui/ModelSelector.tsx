@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { ChevronDown, Check, Cloud, Terminal, Monitor, Server, Plus } from 'lucide-react';
 import { STANDARD_CLOUD_MODELS, prettifyModelId } from '../../utils/modelUtils';
+import { useResolvedTheme } from '../../hooks/useResolvedTheme';
 
 interface ModelSelectorProps {
     currentModel: string;
@@ -20,6 +21,7 @@ export const ModelSelector: React.FC<ModelSelectorProps> = ({ currentModel, onSe
     const [customProviders, setCustomProviders] = useState<CustomProvider[]>([]);
     const [cloudModels, setCloudModels] = useState<{ id: string; name: string; desc: string; provider: string }[]>([]);
     const dropdownRef = useRef<HTMLDivElement>(null);
+    const isLight = useResolvedTheme() === 'light';
 
     // Close on click outside
     useEffect(() => {
@@ -109,9 +111,9 @@ export const ModelSelector: React.FC<ModelSelectorProps> = ({ currentModel, onSe
             </button>
 
             {isOpen && (
-                <div className="absolute bottom-full left-0 mb-2 w-64 bg-bg-item-surface border border-border-subtle rounded-xl shadow-xl z-50 overflow-hidden animated fadeIn">
+                <div className={`absolute bottom-full left-0 mb-2 w-64 rounded-xl shadow-xl z-50 overflow-hidden animated fadeIn ${isLight ? 'bg-white border border-black/10 ring-1 ring-black/5 shadow-[0_10px_40px_-10px_rgba(0,0,0,0.25)]' : 'bg-bg-item-surface border border-border-subtle'}`}>
                     {/* Tabs */}
-                    <div className="flex border-b border-border-subtle bg-bg-input/50">
+                    <div className={`flex border-b ${isLight ? 'bg-slate-50 border-black/10' : 'bg-bg-input/50 border-border-subtle'}`}>
                         <button
                             onClick={() => setActiveTab('cloud')}
                             className={`flex-1 py-2 text-[10px] font-bold uppercase tracking-wider transition-colors ${activeTab === 'cloud' ? 'text-accent-primary bg-bg-item-surface border-t-2 border-t-accent-primary' : 'text-text-secondary hover:text-text-primary'}`}

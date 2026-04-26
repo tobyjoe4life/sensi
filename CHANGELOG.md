@@ -7,6 +7,28 @@ fetches from the GitHub release body, which is seeded from this file).
 
 ---
 
+## [2.17.8] — 2026-04-26
+
+UI polish — close button missing on big resolutions and light-theme
+glitches in the meeting overlay.
+
+### Fixed
+- **Close button on Settings overlay (big-resolution screens).** Added
+  a panel-local X close button at the top-right of the Settings overlay
+  so users on large displays don't have to reach for the title-bar X.
+  Existing sidebar Close button stays.
+- **Light theme — meeting chat overlay code blocks.** Code fences inside
+  `MeetingChatOverlay` were hardcoded to a dark `bg-zinc-800/60` shell
+  with `vscDarkPlus` syntax theme. Now switches to `bg-slate-50/80` +
+  `oneLight` syntax theme when light mode is active.
+- **Light theme — in-meeting model selector dropdown.** The `ModelSelector`
+  popup ("No cloud providers configured" panel) used `bg-bg-item-surface`
+  which resolves to `#EAECEF` in light mode — too close to the page
+  background. Now uses pure white with a stronger ring + drop shadow for
+  separation in light mode (dark-mode appearance unchanged).
+
+---
+
 ## [2.17.7] — 2026-04-25
 
 ### Changed

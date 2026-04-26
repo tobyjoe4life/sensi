@@ -1350,8 +1350,21 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                         }}
                         className="bg-bg-elevated w-full max-w-4xl h-[80vh] rounded-2xl border border-border-subtle shadow-2xl overflow-hidden relative pointer-events-auto"
                     >
-                        <div 
-                            id="settings-panel" 
+                        {/* v2.17.8: top-right X close button on the panel itself.
+                            On big-resolution displays the title-bar X sits far
+                            from the modal so users couldn't easily close it; an
+                            in-panel X is the standard modal affordance. */}
+                        <button
+                            onClick={onClose}
+                            aria-label="Close settings"
+                            title="Close (Esc)"
+                            className={`absolute top-3 right-3 z-10 w-8 h-8 rounded-full flex items-center justify-center transition-colors ${isLight ? 'text-slate-500 hover:text-slate-900 hover:bg-black/5' : 'text-text-secondary hover:text-text-primary hover:bg-white/10'}`}
+                            style={{ visibility: isPreviewingOpacity ? 'hidden' : 'visible' }}
+                        >
+                            <X size={18} strokeWidth={2} />
+                        </button>
+                        <div
+                            id="settings-panel"
                             className="flex w-full h-full"
                             style={{ visibility: isPreviewingOpacity ? 'hidden' : 'visible' }}
                         >

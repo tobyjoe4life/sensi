@@ -11,7 +11,8 @@ import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import 'katex/dist/katex.min.css';
 // PERF (v2.17.2): lazy-loaded Prism — see SensiInterface for rationale.
-import { LazySyntaxHighlighter as SyntaxHighlighter, vscDarkPlus } from './chat/LazySyntaxHighlighter';
+import { LazySyntaxHighlighter as SyntaxHighlighter, vscDarkPlus, oneLight } from './chat/LazySyntaxHighlighter';
+import { useResolvedTheme } from '../hooks/useResolvedTheme';
 
 // ============================================
 // Types 
@@ -86,6 +87,7 @@ const UserMessage: React.FC<{ content: string }> = ({ content }) => (
 
 const AssistantMessage: React.FC<{ content: string; isStreaming?: boolean }> = ({ content, isStreaming }) => {
     const [copied, setCopied] = useState(false);
+    const isLight = useResolvedTheme() === 'light';
 
     const handleCopy = async () => {
         try {
@@ -119,16 +121,16 @@ const AssistantMessage: React.FC<{ content: string; isStreaming?: boolean }> = (
                                 const lang = match ? match[1] : '';
 
                                 return !isInline ? (
-                                    <div className="my-3 rounded-xl overflow-hidden border border-white/[0.08] shadow-lg bg-zinc-800/60 backdrop-blur-md">
-                                        <div className="bg-white/[0.04] px-3 py-1.5 border-b border-white/[0.08]">
-                                            <span className="text-[10px] uppercase tracking-widest font-semibold text-white/40 font-mono">
+                                    <div className={`my-3 rounded-xl overflow-hidden shadow-lg backdrop-blur-md ${isLight ? 'border border-black/10 bg-slate-50/80' : 'border border-white/[0.08] bg-zinc-800/60'}`}>
+                                        <div className={`px-3 py-1.5 border-b ${isLight ? 'bg-black/[0.03] border-black/10' : 'bg-white/[0.04] border-white/[0.08]'}`}>
+                                            <span className={`text-[10px] uppercase tracking-widest font-semibold font-mono ${isLight ? 'text-slate-500' : 'text-white/40'}`}>
                                                 {lang || 'CODE'}
                                             </span>
                                         </div>
                                         <div className="bg-transparent">
                                             <SyntaxHighlighter
                                                 language={lang || 'text'}
-                                                style={vscDarkPlus}
+                                                style={isLight ? oneLight : vscDarkPlus}
                                                 customStyle={{
                                                     margin: 0,
                                                     borderRadius: 0,
@@ -140,7 +142,7 @@ const AssistantMessage: React.FC<{ content: string; isStreaming?: boolean }> = (
                                                 }}
                                                 wrapLongLines={true}
                                                 showLineNumbers={true}
-                                                lineNumberStyle={{ minWidth: '2.5em', paddingRight: '1.2em', color: 'rgba(255,255,255,0.2)', textAlign: 'right', fontSize: '11px' }}
+                                                lineNumberStyle={{ minWidth: '2.5em', paddingRight: '1.2em', color: isLight ? 'rgba(15,23,42,0.35)' : 'rgba(255,255,255,0.2)', textAlign: 'right', fontSize: '11px' }}
                                                 {...props}
                                             >
                                                 {String(children).replace(/\n$/, '')}
@@ -193,6 +195,7 @@ const MeetingChatOverlay: React.FC<MeetingChatOverlayProps> = ({
     const [messages, setMessages] = useState<Message[]>([]);
     const [chatState, setChatState] = useState<ChatState>('idle');
     const [errorMessage, setErrorMessage] = useState<string | null>(null);
+    const isLight = useResolvedTheme() === 'light';
 
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const chatWindowRef = useRef<HTMLDivElement>(null);
