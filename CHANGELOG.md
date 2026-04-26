@@ -7,6 +7,20 @@ fetches from the GitHub release body, which is seeded from this file).
 
 ---
 
+## [2.17.9] — 2026-04-26
+
+### Fixed
+- **Intel Mac build crashed at launch** with `Could not load the sharp
+  module using the darwin-x64 runtime`. Mac CI runs on Apple Silicon
+  (`macos-14`), and sharp 0.33+ uses arch-specific optional dependencies
+  — `npm ci` on the runner only pulled `@img/sharp-darwin-arm64`. The
+  workflow now explicitly installs `@img/sharp-darwin-x64` and
+  `@img/sharp-libvips-darwin-x64` before packaging so both arches'
+  prebuilts ship in their respective ZIPs. Affects any Intel Mac user
+  on v2.17.x; Apple Silicon was unaffected.
+
+---
+
 ## [2.17.8] — 2026-04-26
 
 UI polish — close button missing on big resolutions and light-theme

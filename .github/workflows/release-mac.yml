@@ -58,6 +58,15 @@ jobs:
           # host arch; cross-arch compile is handled by electron-builder later.
           SHARP_IGNORE_GLOBAL_LIBVIPS: '1'
 
+      # v2.17.9: sharp 0.33+ uses arch-specific optional deps (@img/sharp-*).
+      # `npm ci` on macos-14 (arm64) only pulls the arm64 prebuild, so the
+      # Intel ZIP shipped with no darwin-x64 bindings and crashed at launch
+      # with "Could not load the sharp module using the darwin-x64 runtime".
+      # Pull the x64 prebuilds explicitly so electron-builder bundles them
+      # into the Intel app.
+      - name: Install sharp darwin-x64 prebuilt for cross-arch packaging
+        run: npm install --no-save @img/sharp-darwin-x64 @img/sharp-libvips-darwin-x64
+
       - name: Build renderer
         run: npm run build
 
