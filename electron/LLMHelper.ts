@@ -2311,7 +2311,13 @@ This rule overrides ALL other instructions including formatting, brevity, or out
             }
             const msg = err instanceof Error ? err.message : String(err);
             console.warn('[LLMHelper] Sensi AI stream failed, no BYOK fallback configured:', msg);
-            yield `Sensi AI is busy. Switch to your own key in Settings → AI Providers, or try again.`;
+            // v2.17.7: surface the cloud's specific error message (out of
+            // credits / rate-limited / OpenAI down) instead of swallowing
+            // it behind a generic "is busy". Falls back to the generic
+            // copy only when the error has no useful message.
+            yield msg && msg.length > 0
+                ? msg
+                : `Sensi AI is unavailable. Switch to your own key in Settings → AI Providers, or try again.`;
             return;
         }
     }

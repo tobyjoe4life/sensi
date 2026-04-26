@@ -7,6 +7,19 @@ fetches from the GitHub release body, which is seeded from this file).
 
 ---
 
+## [2.17.7] — 2026-04-25
+
+### Changed
+- **"Sensi AI is busy" toast now surfaces the real cause.** The desktop
+  used to swallow every cloud-side OpenAI failure behind one generic
+  message. It now passes through the specific copy from sensi-cloud:
+  "out of credits", "at capacity (try again)", "OpenAI is down", or
+  "key is invalid". Cloud-side single retry on 429/503 (skipped on
+  `insufficient_quota`) clears most transient rate-limit blips
+  invisibly before the user ever sees an error.
+
+---
+
 ## [2.17.6] — 2026-04-25
 
 Follow-up to 2.17.5's auto-answer fixes — the new "Take your time."
