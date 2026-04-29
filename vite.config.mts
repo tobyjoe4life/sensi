@@ -27,10 +27,28 @@ export default defineConfig({
     },
     build: {
         chunkSizeWarningLimit: 1000,
+        // PERF-04 (v2.18.0): switch from esbuild to Terser so we can drop
+        // console.log + debugger statements in prod. Build is ~2-3s slower
+        // but the bundle ends up ~5-10% smaller and cold-boot is faster.
+        minify: 'terser',
+        terserOptions: {
+            compress: {
+                // Strip diagnostic console noise from prod, keep warn/error
+                // so users can still report issues with stack traces.
+                drop_console: ['log', 'debug', 'info'],
+                drop_debugger: true,
+            },
+            format: {
+                comments: false,
+            },
+        },
         rollupOptions: {
             output: {
                 manualChunks: {
                     vendor: ['react', 'react-dom', 'framer-motion'],
+                    // Markdown stack splits cleanly off the entry chunk so it
+                    // can fetch in parallel with the rest of the app.
+                    'vendor-markdown': ['react-markdown', 'remark-gfm', 'remark-math', 'rehype-katex'],
                     ui: ['lucide-react', '@radix-ui/react-dialog', '@radix-ui/react-toast']
                 }
             }

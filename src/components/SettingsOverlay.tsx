@@ -451,6 +451,12 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
     const [verboseLogging, setVerboseLogging] = useState(false);
     const [showVerboseToast, setShowVerboseToast] = useState(false);
     const verboseToastTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+    // PERF-04 (v2.18.0): low-resource mode (auto-seeded from HardwareProfile;
+    // user can override). Disables framer animations + scroll bounce when on.
+    const [lowResourceMode, setLowResourceMode] = useState(false);
+    const [lowResourceProfile, setLowResourceProfile] = useState<{
+        cores: number; gbRam: number; autoIsLowResource: boolean; autoReason: string | null;
+    } | null>(null);
 
     // Close dropdown when clicking outside
     // Sync with global state changes
@@ -469,6 +475,14 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
             window.electronAPI?.getUndetectable?.().then(setIsUndetectable).catch(() => { });
             window.electronAPI?.getOverlayMousePassthrough?.().then(setIsMousePassthrough).catch(() => { });
             window.electronAPI?.getVerboseLogging?.().then(setVerboseLogging).catch(() => { });
+            // PERF-04: hydrate lowResourceMode + auto-detected profile.
+            window.electronAPI?.perfGetProfile?.().then((p) => {
+                setLowResourceProfile({
+                    cores: p.cores, gbRam: p.gbRam,
+                    autoIsLowResource: p.autoIsLowResource, autoReason: p.autoReason,
+                });
+                setLowResourceMode(p.currentLowResource);
+            }).catch(() => { });
             window.electronAPI?.getRollingTriggerMode?.().then((mode) => {
                 if (mode === 'off' || mode === 'on-silence' || mode === 'on-demand') {
                     setRollingMode(mode);
@@ -1706,6 +1720,33 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                                         className={`w-11 h-6 rounded-full relative transition-colors ${openOnLogin ? 'bg-accent-primary' : 'bg-bg-toggle-switch border border-border-muted'}`}
                                                     >
                                                         <div className={`absolute top-1 left-1 w-4 h-4 rounded-full bg-[#F1EDE6] shadow-[0_1px_2px_rgba(0,0,0,0.25)] transition-transform ${openOnLogin ? 'translate-x-5' : 'translate-x-0'}`} />
+                                                    </div>
+                                                </div>
+
+                                                {/* PERF-04: Low-resource mode */}
+                                                <div className="flex items-center justify-between px-4 py-3 border-t border-border-subtle/50">
+                                                    <div className="flex items-center gap-4">
+                                                        <div className={`w-10 h-10 bg-bg-item-surface rounded-lg border flex items-center justify-center transition-colors ${lowResourceMode ? 'border-emerald-500/40 text-emerald-400' : 'border-border-subtle text-text-tertiary'}`}>
+                                                            <Zap size={20} />
+                                                        </div>
+                                                        <div>
+                                                            <h3 className="text-sm font-bold text-text-primary">Low-resource mode</h3>
+                                                            <p className="text-xs text-text-secondary mt-0.5">
+                                                                {lowResourceProfile?.autoReason
+                                                                    ? `Auto-detected (${lowResourceProfile.autoReason}) — disables animations and reduces background work.`
+                                                                    : 'Disables UI animations and reduces background work for slower laptops.'}
+                                                            </p>
+                                                        </div>
+                                                    </div>
+                                                    <div
+                                                        onClick={() => {
+                                                            const newState = !lowResourceMode;
+                                                            setLowResourceMode(newState);
+                                                            window.electronAPI?.perfSetLowResource?.(newState);
+                                                        }}
+                                                        className={`w-11 h-6 rounded-full relative transition-colors cursor-pointer ${lowResourceMode ? 'bg-emerald-500' : 'bg-bg-toggle-switch border border-border-muted'}`}
+                                                    >
+                                                        <div className={`absolute top-1 left-1 w-4 h-4 rounded-full bg-[#F1EDE6] shadow-[0_1px_2px_rgba(0,0,0,0.25)] transition-transform ${lowResourceMode ? 'translate-x-5' : 'translate-x-0'}`} />
                                                     </div>
                                                 </div>
 

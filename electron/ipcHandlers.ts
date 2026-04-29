@@ -3087,6 +3087,13 @@ export function initializeIpcHandlers(appState: AppState): void {
   safeHandle("perf:set-low-resource", async (_, enabled: boolean) => {
     const { SettingsManager } = require('./services/SettingsManager') as typeof import('./services/SettingsManager');
     SettingsManager.getInstance().set('lowResourceMode', !!enabled);
+    // PERF-04 (v2.18.0): broadcast so every renderer can flip its
+    // animations / scroll-bounce / verbose paths without a restart.
+    BrowserWindow.getAllWindows().forEach(win => {
+      if (!win.isDestroyed()) {
+        win.webContents.send('low-resource-mode-changed', !!enabled);
+      }
+    });
     return { success: true };
   });
 

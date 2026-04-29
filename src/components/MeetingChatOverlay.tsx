@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useStreamBuffer } from '../hooks/useStreamBuffer';
 import { useAutoScrollToBottom } from '../hooks/useAutoScrollToBottom';
 import { X, Copy, Check } from 'lucide-react';
-import { motion, AnimatePresence } from 'framer-motion';
+import { motion, AnimatePresence, MotionConfig } from 'framer-motion';
 import { SensiMark } from './SensiLogoMark';
 
 import ReactMarkdown from 'react-markdown';
@@ -13,6 +13,7 @@ import 'katex/dist/katex.min.css';
 // PERF (v2.17.2): lazy-loaded Prism — see SensiInterface for rationale.
 import { LazySyntaxHighlighter as SyntaxHighlighter, vscDarkPlus, oneLight } from './chat/LazySyntaxHighlighter';
 import { useResolvedTheme } from '../hooks/useResolvedTheme';
+import { useLowResourceMode } from '../hooks/useLowResourceMode';
 
 // ============================================
 // Types 
@@ -85,7 +86,7 @@ const UserMessage: React.FC<{ content: string }> = ({ content }) => (
     </motion.div>
 );
 
-const AssistantMessage: React.FC<{ content: string; isStreaming?: boolean }> = ({ content, isStreaming }) => {
+const AssistantMessageInner: React.FC<{ content: string; isStreaming?: boolean }> = ({ content, isStreaming }) => {
     const [copied, setCopied] = useState(false);
     const isLight = useResolvedTheme() === 'light';
 
@@ -181,6 +182,12 @@ const AssistantMessage: React.FC<{ content: string; isStreaming?: boolean }> = (
     );
 };
 
+// PERF-04 (v2.18.0): memoise so prior bubbles don't re-render on every
+// streaming token. Skip re-render when content + isStreaming match.
+const AssistantMessage = React.memo(AssistantMessageInner, (prev, next) => {
+    return prev.content === next.content && prev.isStreaming === next.isStreaming;
+});
+
 // ============================================
 // Main Component
 // ============================================
@@ -196,6 +203,9 @@ const MeetingChatOverlay: React.FC<MeetingChatOverlayProps> = ({
     const [chatState, setChatState] = useState<ChatState>('idle');
     const [errorMessage, setErrorMessage] = useState<string | null>(null);
     const isLight = useResolvedTheme() === 'light';
+    // PERF-04: in low-resource mode, framer animations are short-circuited
+    // to instant transitions via the MotionConfig wrapper below.
+    const lowResource = useLowResourceMode();
 
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const chatWindowRef = useRef<HTMLDivElement>(null);
@@ -483,6 +493,7 @@ ${contextString}`;
     }, [chatState, buildContextString, meetingContext]);
 
     return (
+        <MotionConfig reducedMotion={lowResource ? 'always' : 'never'}>
         <AnimatePresence>
             {isOpen && (
                 <motion.div
@@ -556,6 +567,7 @@ ${contextString}`;
                 </motion.div>
             )}
         </AnimatePresence>
+        </MotionConfig>
     );
 };
 

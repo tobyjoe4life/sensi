@@ -2,8 +2,9 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useStreamBuffer } from '../hooks/useStreamBuffer';
 import { useAutoScrollToBottom } from '../hooks/useAutoScrollToBottom';
 import { X, Copy, Check, Globe, ArrowUp } from 'lucide-react';
-import { motion, AnimatePresence } from 'framer-motion';
+import { motion, AnimatePresence, MotionConfig } from 'framer-motion';
 import { SensiMark } from './SensiLogoMark';
+import { useLowResourceMode } from '../hooks/useLowResourceMode';
 
 // ============================================
 // Types
@@ -63,7 +64,7 @@ const UserMessage: React.FC<{ content: string }> = ({ content }) => (
     </motion.div>
 );
 
-const AssistantMessage: React.FC<{ content: string; isStreaming?: boolean }> = ({ content, isStreaming }) => {
+const AssistantMessageInner: React.FC<{ content: string; isStreaming?: boolean }> = ({ content, isStreaming }) => {
     const [copied, setCopied] = useState(false);
 
     const handleCopy = async () => {
@@ -106,6 +107,12 @@ const AssistantMessage: React.FC<{ content: string; isStreaming?: boolean }> = (
     );
 };
 
+// PERF-04 (v2.18.0): memoise so prior bubbles don't re-render on every
+// streaming token. Same equality contract as MeetingChatOverlay.
+const AssistantMessage = React.memo(AssistantMessageInner, (prev, next) => {
+    return prev.content === next.content && prev.isStreaming === next.isStreaming;
+});
+
 // ============================================
 // Main Component
 // ============================================
@@ -122,6 +129,9 @@ const GlobalChatOverlay: React.FC<GlobalChatOverlayProps> = ({
     const [errorMessage, setErrorMessage] = useState<string | null>(null);
     const [query, setQuery] = useState('');
     const streamBuffer = useStreamBuffer();
+    // PERF-04: low-resource mode → MotionConfig switches all framer
+    // animations to instant transitions for free CPU + main-thread savings.
+    const lowResource = useLowResourceMode();
 
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const chatWindowRef = useRef<HTMLDivElement>(null);
@@ -307,6 +317,7 @@ const GlobalChatOverlay: React.FC<GlobalChatOverlayProps> = ({
     }, [chatState]);
 
     return (
+        <MotionConfig reducedMotion={lowResource ? 'always' : 'never'}>
         <AnimatePresence
             onExitComplete={() => {
                 setChatState('idle');
@@ -412,6 +423,7 @@ const GlobalChatOverlay: React.FC<GlobalChatOverlayProps> = ({
                 </motion.div>
             )}
         </AnimatePresence>
+        </MotionConfig>
     );
 };
 

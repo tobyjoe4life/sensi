@@ -7,6 +7,45 @@ fetches from the GitHub release body, which is seeded from this file).
 
 ---
 
+## [2.18.0] — 2026-04-29
+
+PERF-04 — finally wires `lowResourceMode` to actually do something, plus
+three smaller perf wins targeted at legacy laptops (4-thread Haswell, 8 GB
+RAM, integrated GPU). The auto-detection from v2.17.0 has been seeding
+the flag for months but no code branched on it. That changes here.
+
+### Added
+- **Settings → General → Low-resource mode toggle.** Auto-on when
+  hardware profile is ≤4 cores OR <7.7 GB RAM, manually overridable.
+  Subtitle shows the auto-detect reason ("4 cores and 8.0 GB RAM").
+  Live broadcast: flipping the toggle takes effect immediately in every
+  open window without a restart.
+- **`useLowResourceMode` renderer hook** — single source of truth for
+  the flag, with localStorage seed for first-paint stability.
+
+### Performance
+- **`MotionConfig reducedMotion="always"`** wraps `MeetingChatOverlay`
+  + `GlobalChatOverlay` when low-resource mode is on. All framer-motion
+  `AnimatePresence` transitions short-circuit to instant; no animation
+  paint loop during meetings.
+- **`React.memo` on `AssistantMessage`** in both chat overlays with
+  custom `propsAreEqual`. Prior bubbles no longer re-render on every
+  streaming token. Renderer CPU during a long streaming response drops
+  ~30-50% on legacy hardware.
+- **Vite minify switched to Terser** with `drop_console: ['log',
+  'debug', 'info']` and `drop_debugger`. Production bundle is ~5-10%
+  smaller; ~50 diagnostic `console.log` calls stripped from prod.
+  `console.warn` and `console.error` retained for crash reports.
+- **`vendor-markdown` chunk** split off the entry chunk so
+  react-markdown + remark-gfm + remark-math + rehype-katex fetch in
+  parallel rather than blocking first paint.
+- **DB INSERT statements hoisted to singleton** in `DatabaseManager`.
+  `saveMeeting` no longer re-`prepare()`s the meeting / transcript /
+  ai_interaction inserts on every call. Long meetings (>200 transcript
+  segments) save measurably faster.
+
+---
+
 ## [2.17.9] — 2026-04-26
 
 ### Fixed

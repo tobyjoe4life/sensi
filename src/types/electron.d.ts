@@ -345,6 +345,7 @@ export interface ElectronAPI {
     currentLowResource: boolean
   }>
   perfSetLowResource: (enabled: boolean) => Promise<{ success: boolean }>
+  onLowResourceModeChanged: (callback: (enabled: boolean) => void) => () => void
 
   onAuthStateChanged: (callback: (state: SensiAuthStateIpc) => void) => () => void
 

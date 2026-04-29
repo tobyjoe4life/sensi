@@ -1183,6 +1183,12 @@ contextBridge.exposeInMainWorld("electronAPI", {
   // PERF-03 (v2.17.0) — low-resource mode
   perfGetProfile: () => ipcRenderer.invoke('perf:get-profile'),
   perfSetLowResource: (enabled: boolean) => ipcRenderer.invoke('perf:set-low-resource', enabled),
+  // PERF-04 (v2.18.0) — live broadcast so renderers can flip animations etc. without restart.
+  onLowResourceModeChanged: (callback: (enabled: boolean) => void) => {
+    const sub = (_: unknown, enabled: boolean) => callback(!!enabled);
+    ipcRenderer.on('low-resource-mode-changed', sub);
+    return () => ipcRenderer.removeListener('low-resource-mode-changed', sub);
+  },
 
   onAuthStateChanged: (callback: (state: unknown) => void) => {
     const sub = (_: unknown, state: unknown) => callback(state);

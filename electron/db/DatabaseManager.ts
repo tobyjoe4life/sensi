@@ -147,6 +147,12 @@ export class DatabaseManager {
     // DatabaseManager, created on first access so a DatabaseManager built
     // before the kb_ tables exist (e.g. during migrations) still works.
     private knowledgeStore: KnowledgeStore | null = null;
+    // PERF-04 (v2.18.0): hot INSERT statements prepared once, reused for
+    // every meeting save. Long meetings (>200 transcript segments)
+    // previously paid per-save prepare cost on top of per-row execute.
+    private _stmtInsertMeeting: Database.Statement | null = null;
+    private _stmtInsertTranscript: Database.Statement | null = null;
+    private _stmtInsertInteraction: Database.Statement | null = null;
 
     private constructor() {
         const userDataPath = app.getPath('userData');
@@ -943,20 +949,30 @@ export class DatabaseManager {
             return;
         }
 
-        const insertMeeting = this.db.prepare(`
-            INSERT OR REPLACE INTO meetings (id, title, start_time, duration_ms, summary_json, created_at, calendar_event_id, source, is_processed)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `);
-
-        const insertTranscript = this.db.prepare(`
-            INSERT INTO transcripts (meeting_id, speaker, content, timestamp_ms)
-            VALUES (?, ?, ?, ?)
-        `);
-
-        const insertInteraction = this.db.prepare(`
-            INSERT INTO ai_interactions (meeting_id, type, timestamp, user_query, ai_response, metadata_json)
-            VALUES (?, ?, ?, ?, ?, ?)
-        `);
+        // PERF-04 (v2.18.0): prepare-once, reuse-forever. Cached on the
+        // singleton so a meeting with 500+ transcript segments doesn't
+        // re-pay the prepare cost per saveMeeting() call.
+        if (!this._stmtInsertMeeting) {
+            this._stmtInsertMeeting = this.db.prepare(`
+                INSERT OR REPLACE INTO meetings (id, title, start_time, duration_ms, summary_json, created_at, calendar_event_id, source, is_processed)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            `);
+        }
+        if (!this._stmtInsertTranscript) {
+            this._stmtInsertTranscript = this.db.prepare(`
+                INSERT INTO transcripts (meeting_id, speaker, content, timestamp_ms)
+                VALUES (?, ?, ?, ?)
+            `);
+        }
+        if (!this._stmtInsertInteraction) {
+            this._stmtInsertInteraction = this.db.prepare(`
+                INSERT INTO ai_interactions (meeting_id, type, timestamp, user_query, ai_response, metadata_json)
+                VALUES (?, ?, ?, ?, ?, ?)
+            `);
+        }
+        const insertMeeting = this._stmtInsertMeeting;
+        const insertTranscript = this._stmtInsertTranscript;
+        const insertInteraction = this._stmtInsertInteraction;
 
         const summaryJson = JSON.stringify({
             legacySummary: meeting.summary,
