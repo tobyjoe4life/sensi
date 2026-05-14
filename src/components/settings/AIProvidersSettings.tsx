@@ -17,6 +17,117 @@ interface ModelOption {
     name: string;
 }
 
+interface ProviderPreset {
+    name: string;
+    label: string;
+    description: string;
+    curlCommand: string;
+    responsePath: string;
+}
+
+const OPENAI_COMPATIBLE_RESPONSE_PATH = 'choices[0].message.content';
+
+const OPENCODE_PROVIDER_PRESETS: ProviderPreset[] = [
+    {
+        name: 'OpenRouter',
+        label: 'OpenRouter',
+        description: 'Broad OpenCode-style model routing via OpenRouter.',
+        responsePath: OPENAI_COMPATIBLE_RESPONSE_PATH,
+        curlCommand: `curl https://openrouter.ai/api/v1/chat/completions \\
+  -H "Content-Type: application/json" \\
+  -H "Authorization: Bearer TOKEN_HERE" \\
+  -H "HTTP-Referer: https://sensi.cloudfrontiers.co.uk" \\
+  -H "X-Title: sensi" \\
+  -d '{
+    "model": "anthropic/claude-sonnet-4.5",
+    "messages": [
+      {"role": "user", "content": "{{TEXT}}"}
+    ],
+    "temperature": 0.7
+  }'`,
+    },
+    {
+        name: 'DeepSeek',
+        label: 'DeepSeek',
+        description: 'OpenCode-compatible DeepSeek chat endpoint.',
+        responsePath: OPENAI_COMPATIBLE_RESPONSE_PATH,
+        curlCommand: `curl https://api.deepseek.com/chat/completions \\
+  -H "Content-Type: application/json" \\
+  -H "Authorization: Bearer TOKEN_HERE" \\
+  -d '{
+    "model": "deepseek-chat",
+    "messages": [
+      {"role": "user", "content": "{{TEXT}}"}
+    ],
+    "temperature": 0.7
+  }'`,
+    },
+    {
+        name: 'xAI Grok',
+        label: 'xAI',
+        description: 'Grok models through xAI\'s OpenAI-compatible API.',
+        responsePath: OPENAI_COMPATIBLE_RESPONSE_PATH,
+        curlCommand: `curl https://api.x.ai/v1/chat/completions \\
+  -H "Content-Type: application/json" \\
+  -H "Authorization: Bearer TOKEN_HERE" \\
+  -d '{
+    "model": "grok-4",
+    "messages": [
+      {"role": "user", "content": "{{TEXT}}"}
+    ],
+    "temperature": 0.7
+  }'`,
+    },
+    {
+        name: 'Mistral',
+        label: 'Mistral',
+        description: 'Mistral hosted chat models using the OpenAI-compatible shape.',
+        responsePath: OPENAI_COMPATIBLE_RESPONSE_PATH,
+        curlCommand: `curl https://api.mistral.ai/v1/chat/completions \\
+  -H "Content-Type: application/json" \\
+  -H "Authorization: Bearer TOKEN_HERE" \\
+  -d '{
+    "model": "mistral-large-latest",
+    "messages": [
+      {"role": "user", "content": "{{TEXT}}"}
+    ],
+    "temperature": 0.7
+  }'`,
+    },
+    {
+        name: 'Together AI',
+        label: 'Together',
+        description: 'Together AI serverless models, OpenAI-compatible.',
+        responsePath: OPENAI_COMPATIBLE_RESPONSE_PATH,
+        curlCommand: `curl https://api.together.xyz/v1/chat/completions \\
+  -H "Content-Type: application/json" \\
+  -H "Authorization: Bearer TOKEN_HERE" \\
+  -d '{
+    "model": "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+    "messages": [
+      {"role": "user", "content": "{{TEXT}}"}
+    ],
+    "temperature": 0.7
+  }'`,
+    },
+    {
+        name: 'Cerebras',
+        label: 'Cerebras',
+        description: 'Fast Cerebras inference through an OpenAI-compatible endpoint.',
+        responsePath: OPENAI_COMPATIBLE_RESPONSE_PATH,
+        curlCommand: `curl https://api.cerebras.ai/v1/chat/completions \\
+  -H "Content-Type: application/json" \\
+  -H "Authorization: Bearer TOKEN_HERE" \\
+  -d '{
+    "model": "llama3.1-8b",
+    "messages": [
+      {"role": "user", "content": "{{TEXT}}"}
+    ],
+    "temperature": 0.7
+  }'`,
+    },
+];
+
 interface ModelSelectProps {
     value: string;
     options: ModelOption[];
@@ -415,6 +526,15 @@ export const AIProvidersSettings: React.FC = () => {
         setCustomName('');
         setCustomCurl('');
         setCustomResponsePath('');
+        setIsEditingCustom(true);
+        setCurlError(null);
+    };
+
+    const handleUseProviderPreset = (preset: ProviderPreset) => {
+        setEditingProvider(null);
+        setCustomName(preset.name);
+        setCustomCurl(preset.curlCommand);
+        setCustomResponsePath(preset.responsePath);
         setIsEditingCustom(true);
         setCurlError(null);
     };
@@ -917,6 +1037,38 @@ export const AIProvidersSettings: React.FC = () => {
                 </div>
             </div>
 
+            {/* OpenCode-compatible Provider Presets */}
+            <div className="space-y-5">
+                <div className="flex items-center justify-between mb-2">
+                    <div>
+                        <div className="flex items-center gap-2 mb-1">
+                            <h3 className="text-sm font-bold text-text-primary">OpenCode Provider Presets</h3>
+                            <span className="px-1.5 py-0 rounded-full text-[7px] font-bold bg-blue-500/10 text-blue-400 uppercase tracking-widest border border-blue-500/20 leading-loose mt-0.5">BYOK</span>
+                        </div>
+                        <p className="text-xs text-text-secondary">Quick-add OpenCode-style OpenAI-compatible endpoints, then paste your own key.</p>
+                    </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    {OPENCODE_PROVIDER_PRESETS.map((preset) => (
+                        <button
+                            key={preset.name}
+                            type="button"
+                            onClick={() => handleUseProviderPreset(preset)}
+                            className="text-left bg-bg-item-surface hover:bg-bg-elevated rounded-xl p-4 border border-border-subtle transition-colors group"
+                            title={`Use ${preset.name} preset`}
+                        >
+                            <div className="flex items-center justify-between gap-3 mb-1">
+                                <h4 className="text-sm font-medium text-text-primary">{preset.label}</h4>
+                                <span className="text-[9px] text-text-tertiary group-hover:text-accent-primary transition-colors">Use preset</span>
+                            </div>
+                            <p className="text-[10px] text-text-secondary leading-relaxed">{preset.description}</p>
+                            <p className="text-[9px] text-text-tertiary font-mono mt-2 truncate">path: {preset.responsePath}</p>
+                        </button>
+                    ))}
+                </div>
+            </div>
+
             {/* Custom Providers */}
             <div className="space-y-5">
                 <div className="flex items-center justify-between mb-2">
@@ -1023,7 +1175,7 @@ export const AIProvidersSettings: React.FC = () => {
                                                     <code className="font-mono text-[10px] text-text-primary whitespace-pre block">
                                                         {`curl https://api.openai.com/v1/chat/completions \\
   -H "Content-Type: application/json" \\
-  -H "Authorization: Bearer YOUR_API_KEY" \\
+  -H "Authorization: Bearer TOKEN_HERE" \\
   -d '{
     "model": "gpt-4o-mini",
     "messages": [
