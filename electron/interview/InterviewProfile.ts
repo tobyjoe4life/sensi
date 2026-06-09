@@ -3,6 +3,7 @@ import type { IntentResult } from '../llm/IntentClassifier';
 
 export type InterviewSector = 'general' | 'civil_service_public_sector';
 export type InterviewStarPolicy = 'detected_competency' | 'always_in_sector' | 'manual';
+export type InterviewAnswerStyle = 'auto' | 'concise' | 'elaborate' | 'star';
 
 export interface InterviewProfile {
     enabled: boolean;
@@ -12,12 +13,14 @@ export interface InterviewProfile {
     sector: InterviewSector;
     companyFirst: boolean;
     starPolicy: InterviewStarPolicy;
+    answerStyleDefault: InterviewAnswerStyle;
     customNotes: string;
 }
 
 export interface InterviewProfileContextOptions {
     query?: string;
     intent?: IntentResult;
+    answerStyleOverride?: InterviewAnswerStyle | null;
 }
 
 export const DEFAULT_INTERVIEW_PROFILE: InterviewProfile = {
@@ -28,6 +31,7 @@ export const DEFAULT_INTERVIEW_PROFILE: InterviewProfile = {
     sector: 'civil_service_public_sector',
     companyFirst: true,
     starPolicy: 'always_in_sector',
+    answerStyleDefault: 'auto',
     customNotes: '',
 };
 
@@ -37,10 +41,24 @@ const VALID_STAR_POLICIES = new Set<InterviewStarPolicy>([
     'always_in_sector',
     'manual',
 ]);
+const VALID_ANSWER_STYLES = new Set<InterviewAnswerStyle>([
+    'auto',
+    'concise',
+    'elaborate',
+    'star',
+]);
 
 function cleanText(value: unknown, maxChars: number): string {
     if (typeof value !== 'string') return '';
     return value.replace(/\s+/g, ' ').trim().slice(0, maxChars);
+}
+
+export function isInterviewAnswerStyle(input: unknown): input is InterviewAnswerStyle {
+    return typeof input === 'string' && VALID_ANSWER_STYLES.has(input as InterviewAnswerStyle);
+}
+
+export function normalizeInterviewAnswerStyle(input: unknown): InterviewAnswerStyle {
+    return isInterviewAnswerStyle(input) ? input : DEFAULT_INTERVIEW_PROFILE.answerStyleDefault;
 }
 
 export function normalizeInterviewProfile(input: unknown): InterviewProfile {
@@ -51,6 +69,7 @@ export function normalizeInterviewProfile(input: unknown): InterviewProfile {
     const starPolicy = VALID_STAR_POLICIES.has(raw.starPolicy as InterviewStarPolicy)
         ? raw.starPolicy as InterviewStarPolicy
         : DEFAULT_INTERVIEW_PROFILE.starPolicy;
+    const answerStyleDefault = normalizeInterviewAnswerStyle(raw.answerStyleDefault);
 
     return {
         enabled: typeof raw.enabled === 'boolean' ? raw.enabled : DEFAULT_INTERVIEW_PROFILE.enabled,
@@ -62,6 +81,7 @@ export function normalizeInterviewProfile(input: unknown): InterviewProfile {
             ? raw.companyFirst
             : DEFAULT_INTERVIEW_PROFILE.companyFirst,
         starPolicy,
+        answerStyleDefault,
         customNotes: cleanText(raw.customNotes, 500),
     };
 }
@@ -132,11 +152,16 @@ function buildPolicyLines(
     profile: InterviewProfile,
     options: InterviewProfileContextOptions
 ): string[] {
+    const answerStyle = normalizeInterviewAnswerStyle(
+        options.answerStyleOverride ?? profile.answerStyleDefault
+    );
+
     if (profile.sector === 'general') {
-        return [
+        const lines = [
             'SECTOR: General interview.',
             'STYLE: Speak naturally in first person. Use structured examples only when the question asks for experience or behaviour.',
         ];
+        return applyAnswerStyle(lines, answerStyle);
     }
 
     const intent = options.intent?.intent;
@@ -150,6 +175,12 @@ function buildPolicyLines(
         'SECTOR: Civil Service / Public Sector.',
         'FRAMEWORK: Treat the interview as Success Profiles style. Role and job advert evidence comes first; sector policy shapes delivery.',
     ];
+
+    if (answerStyle !== 'auto') {
+        return applyAnswerStyle(lines, answerStyle);
+    }
+
+    lines.push('ANSWER MODE: Auto. Preserve the detected interview intent and the configured Civil Service sector policy.');
 
     if (isCoding) {
         lines.push('ANSWER STYLE: Technical or coding question detected. Do not force STAR; answer directly using the technical interview format.');
@@ -169,6 +200,39 @@ function buildPolicyLines(
 
     lines.push('ANSWER STYLE: Use direct first-person answers. Apply STAR only when the question clearly asks for a behaviour or example.');
     return lines;
+}
+
+function applyAnswerStyle(lines: string[], answerStyle: InterviewAnswerStyle): string[] {
+    switch (answerStyle) {
+        case 'concise':
+            return [
+                ...lines,
+                'ANSWER MODE: Concise.',
+                'ANSWER STYLE: Give a 1-2 sentence spoken answer. Be outcome-focused, use concrete evidence, and avoid padding.',
+                'CIVIL SERVICE NOTE: For DWP/Civil Service roles, include public-service, stakeholder, customer, claimant, or delivery impact only when it naturally fits.',
+            ];
+        case 'elaborate':
+            return [
+                ...lines,
+                'ANSWER MODE: Elaborate.',
+                'ANSWER STYLE: Give a fuller 45-75 second spoken answer with clear context, action, evidence, result, and impact.',
+                'CIVIL SERVICE NOTE: For DWP/Civil Service roles, bring in Success Profiles-style evidence, DWP/public-sector relevance, and stakeholder/customer/claimant impact where relevant. Keep it useful, not padded.',
+            ];
+        case 'star':
+            return [
+                ...lines,
+                'ANSWER MODE: STAR.',
+                'ANSWER STYLE: Force labelled STAR for every answer type, including behavioural, strength, situational, technical, coding, and direct questions.',
+                'DELIVERY: Use headings exactly: Situation, Task, Action, Result. Make the answer first-person, spoken, evidence-led, and suitable for DWP/Civil Service Success Profiles interviews.',
+                'TECHNICAL MAPPING: For technical or coding answers, map Situation to the problem context, Task to the objective and constraints, Action to the approach, implementation, and code, and Result to the outcome, validation, complexity, and tradeoffs. Include code when required.',
+            ];
+        case 'auto':
+        default:
+            return [
+                ...lines,
+                'ANSWER MODE: Auto. Preserve the detected interview intent and the configured sector policy.',
+            ];
+    }
 }
 
 export function isInterviewProfileActive(profile: InterviewProfile = getInterviewProfile()): boolean {

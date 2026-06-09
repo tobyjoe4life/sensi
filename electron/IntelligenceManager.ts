@@ -13,6 +13,7 @@ import { SessionTracker } from './SessionTracker';
 import { IntelligenceEngine } from './IntelligenceEngine';
 import { MeetingPersistence } from './MeetingPersistence';
 import type { RollingTriggerMode } from './llm/RollingTriggerPolicy';
+import type { InterviewAnswerStyle } from './interview/InterviewProfile';
 
 // Re-export types for backward compatibility
 export type { TranscriptSegment, SuggestionTrigger, ContextItem } from './SessionTracker';
@@ -185,6 +186,22 @@ export class IntelligenceManager extends EventEmitter {
     }
 
     // ============================================
+    // Interview answer style (session-only override)
+    // ============================================
+
+    getSessionAnswerStyle(): InterviewAnswerStyle {
+        return this.engine.getSessionAnswerStyle();
+    }
+
+    setSessionAnswerStyle(style: InterviewAnswerStyle): InterviewAnswerStyle {
+        return this.engine.setSessionAnswerStyle(style);
+    }
+
+    clearSessionAnswerStyleOverride(): InterviewAnswerStyle {
+        return this.engine.clearSessionAnswerStyleOverride();
+    }
+
+    // ============================================
     // Mode Executors (delegates to engine)
     // ============================================
 
@@ -282,6 +299,7 @@ export class IntelligenceManager extends EventEmitter {
 
     reset(): void {
         this.session.reset();
+        this.engine.clearSessionAnswerStyleOverride();
         this.engine.reset();
     }
 }

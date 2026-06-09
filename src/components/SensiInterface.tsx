@@ -49,6 +49,7 @@ import 'katex/dist/katex.min.css';
 import { useShortcuts } from '../hooks/useShortcuts';
 import { useResolvedTheme } from '../hooks/useResolvedTheme';
 import { getOverlayAppearance, OVERLAY_OPACITY_DEFAULT } from '../lib/overlayAppearance';
+import type { InterviewAnswerStyleIpc } from '../types/electron';
 
 interface Message {
     id: string;
@@ -75,6 +76,13 @@ interface SensiInterfaceProps {
     onEndMeeting?: () => void;
     overlayOpacity?: number;
 }
+
+const ANSWER_STYLE_OPTIONS: Array<{ id: InterviewAnswerStyleIpc; label: string; title: string }> = [
+    { id: 'auto', label: 'Auto', title: 'Use the saved interview profile logic' },
+    { id: 'concise', label: 'Concise', title: 'Short outcome-focused answers' },
+    { id: 'elaborate', label: 'Elaborate', title: 'Fuller 45-75 second answers' },
+    { id: 'star', label: 'STAR', title: 'Force labelled STAR answers' },
+];
 
 const SensiInterface: React.FC<SensiInterfaceProps> = ({ onEndMeeting, overlayOpacity = OVERLAY_OPACITY_DEFAULT }) => {
     const isLightTheme = useResolvedTheme() === 'light';
@@ -167,6 +175,7 @@ const SensiInterface: React.FC<SensiInterfaceProps> = ({ onEndMeeting, overlayOp
 
     // Dynamic Action Button Mode (Recap vs Brainstorm)
     const [actionButtonMode, setActionButtonMode] = useState<'recap' | 'brainstorm'>('recap');
+    const [answerStyle, setAnswerStyle] = useState<InterviewAnswerStyleIpc>('auto');
 
     // sensi M7 / RESEARCH-01: standalone Tavily research chip
     const [showResearchInput, setShowResearchInput] = useState(false);
@@ -186,6 +195,36 @@ const SensiInterface: React.FC<SensiInterfaceProps> = ({ onEndMeeting, overlayOp
         });
         return () => { unsubscribe?.(); };
     }, []);
+
+    useEffect(() => {
+        let cancelled = false;
+        window.electronAPI?.interviewAnswerStyleGetSession?.()
+            .then((res) => {
+                if (!cancelled && res?.success) {
+                    setAnswerStyle(res.style);
+                }
+            })
+            .catch(() => {});
+
+        const unsubscribe = window.electronAPI?.onInterviewAnswerStyleChanged?.((style) => {
+            setAnswerStyle(style);
+        });
+        return () => {
+            cancelled = true;
+            unsubscribe?.();
+        };
+    }, []);
+
+    const handleAnswerStyleSelect = (style: InterviewAnswerStyleIpc) => {
+        setAnswerStyle(style);
+        window.electronAPI?.interviewAnswerStyleSetSession?.(style)
+            .then((res) => {
+                if (res?.success) {
+                    setAnswerStyle(res.style);
+                }
+            })
+            .catch(() => {});
+    };
 
     const codeTheme = isLightTheme ? oneLight : vscDarkPlus;
     const codeLineNumberColor = isLightTheme ? 'rgba(15,23,42,0.35)' : 'rgba(255,255,255,0.2)';
@@ -453,6 +492,11 @@ const SensiInterface: React.FC<SensiInterfaceProps> = ({ onEndMeeting, overlayOp
             setRollingTranscript('');
             setIsInterviewerSpeaking(false);
             voiceInputRef.current = '';
+            window.electronAPI?.interviewAnswerStyleGetSession?.()
+                .then((res) => {
+                    if (res?.success) setAnswerStyle(res.style);
+                })
+                .catch(() => {});
             // Optionally reset connection status if needed, but connection persists
 
         });
@@ -2399,6 +2443,34 @@ Provide only the answer, nothing else.`;
                             )}
 
                             {/* Quick Actions - Minimal & Clean */}
+                            <div className="flex justify-center px-4 pb-1 no-drag">
+                                <div
+                                    className={`inline-flex items-center gap-0.5 rounded-full border p-0.5 ${quickActionClass}`}
+                                    style={appearance.chipStyle}
+                                    role="group"
+                                    aria-label="Interview answer style"
+                                >
+                                    {ANSWER_STYLE_OPTIONS.map((option) => {
+                                        const active = answerStyle === option.id;
+                                        return (
+                                            <button
+                                                key={option.id}
+                                                type="button"
+                                                onClick={() => handleAnswerStyleSelect(option.id)}
+                                                className={`h-6 min-w-[48px] rounded-full px-2 text-[10px] font-semibold transition-colors ${
+                                                    active
+                                                        ? 'bg-[var(--accent-primary)] text-[#16151A]'
+                                                        : 'opacity-70 hover:opacity-100'
+                                                }`}
+                                                title={option.title}
+                                                aria-pressed={active}
+                                            >
+                                                {option.label}
+                                            </button>
+                                        );
+                                    })}
+                                </div>
+                            </div>
                             <div className={`flex flex-nowrap justify-center items-center gap-1.5 px-4 pb-3 overflow-x-hidden ${rollingTranscript && showTranscript ? 'pt-1' : 'pt-3'}`}>
                                 <button onClick={handleWhatToSay} className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[11px] font-medium border transition-all active:scale-95 duration-200 interaction-base interaction-press whitespace-nowrap shrink-0 ${quickActionClass}`} style={appearance.chipStyle}>
                                     <Pencil className="w-3 h-3 opacity-70" /> What to answer?

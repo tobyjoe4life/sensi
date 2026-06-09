@@ -54,7 +54,10 @@ export function initializeIpcHandlers(appState: AppState): void {
     try {
       const { buildInterviewProfileContextBlock } =
         require('./interview/InterviewProfile') as typeof import('./interview/InterviewProfile');
-      const interviewBlock = buildInterviewProfileContextBlock(undefined, { query });
+      const interviewBlock = buildInterviewProfileContextBlock(undefined, {
+        query,
+        answerStyleOverride: appState.getIntelligenceManager().getSessionAnswerStyle(),
+      });
       if (interviewBlock && interviewBlock.trim().length > 0) {
         parts.push(interviewBlock);
       }
@@ -2436,9 +2439,34 @@ export function initializeIpcHandlers(appState: AppState): void {
         require('./interview/InterviewProfile') as typeof import('./interview/InterviewProfile');
       const profile = updateInterviewProfile(profilePatch);
       broadcastInterviewProfileChanged(profile);
+      appState.broadcast('interview-answer-style-changed', appState.getIntelligenceManager().getSessionAnswerStyle());
       return { success: true, profile };
     } catch (error: any) {
       return { success: false, error: error?.message ?? 'Failed to save interview profile.' };
+    }
+  });
+
+  safeHandle("interview-answer-style:get-session", () => {
+    try {
+      const style = appState.getIntelligenceManager().getSessionAnswerStyle();
+      return { success: true, style };
+    } catch (error: any) {
+      return { success: false, error: error?.message ?? 'Failed to read interview answer style.' };
+    }
+  });
+
+  safeHandle("interview-answer-style:set-session", (_, style: unknown) => {
+    try {
+      const { isInterviewAnswerStyle } =
+        require('./interview/InterviewProfile') as typeof import('./interview/InterviewProfile');
+      if (!isInterviewAnswerStyle(style)) {
+        return { success: false, error: 'Invalid interview answer style.' };
+      }
+      const nextStyle = appState.getIntelligenceManager().setSessionAnswerStyle(style);
+      appState.broadcast('interview-answer-style-changed', nextStyle);
+      return { success: true, style: nextStyle };
+    } catch (error: any) {
+      return { success: false, error: error?.message ?? 'Failed to set interview answer style.' };
     }
   });
 
@@ -2505,6 +2533,7 @@ export function initializeIpcHandlers(appState: AppState): void {
     try {
       const intelligenceManager = appState.getIntelligenceManager();
       intelligenceManager.reset();
+      appState.broadcast('interview-answer-style-changed', intelligenceManager.getSessionAnswerStyle());
       return { success: true };
     } catch (error: any) {
       return { success: false, error: error.message };

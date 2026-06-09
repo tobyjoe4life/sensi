@@ -13,6 +13,12 @@ import {
     type IntentResult
 } from './llm';
 import { RollingTriggerPolicy, RollingTriggerMode, isValidRollingTriggerMode } from './llm/RollingTriggerPolicy';
+import {
+    buildInterviewProfileContextBlock,
+    getInterviewProfile,
+    normalizeInterviewAnswerStyle,
+    type InterviewAnswerStyle,
+} from './interview/InterviewProfile';
 
 /**
  * sensi M4-T8: defensive factory for the WhatToAnswerLLM knowledge hook.
@@ -74,13 +80,16 @@ function buildPersonaContextClosureOrNull(): ((eventId?: string) => string) | nu
  * separate from persona and knowledge so generic chat/summary flows stay
  * unpolluted unless the caller opted into interview context.
  */
-function buildInterviewProfileContextClosureOrNull(): ((query: string, intent?: IntentResult) => string) | null {
+function buildInterviewProfileContextClosureOrNull(
+    getAnswerStyle: () => InterviewAnswerStyle
+): ((query: string, intent?: IntentResult) => string) | null {
     try {
-        // eslint-disable-next-line @typescript-eslint/no-require-imports
-        const { buildInterviewProfileContextBlock } =
-            require('./interview/InterviewProfile') as typeof import('./interview/InterviewProfile');
         return (query: string, intent?: IntentResult) =>
-            buildInterviewProfileContextBlock(undefined, { query, intent });
+            buildInterviewProfileContextBlock(undefined, {
+                query,
+                intent,
+                answerStyleOverride: getAnswerStyle(),
+            });
     } catch (e) {
         console.warn(
             '[IntelligenceEngine] Interview profile context closure unavailable, live-assist will run without interview profile:',
@@ -173,6 +182,7 @@ export class IntelligenceEngine extends EventEmitter {
     private personaContextFn: ((eventId?: string) => string) | null = null;
     private interviewProfileContextFn: ((query: string, intent?: IntentResult) => string) | null = null;
     private activeEventId: string | null = null;
+    private sessionAnswerStyleOverride: InterviewAnswerStyle | null = null;
 
     // Concurrency tracking
     private assistCancellationToken: AbortController | null = null;
@@ -355,6 +365,36 @@ export class IntelligenceEngine extends EventEmitter {
         return this.recapLLM;
     }
 
+    private getSavedDefaultAnswerStyle(): InterviewAnswerStyle {
+        try {
+            return normalizeInterviewAnswerStyle(getInterviewProfile().answerStyleDefault);
+        } catch (e) {
+            console.warn(
+                '[IntelligenceEngine] Interview answer style unavailable, defaulting to auto:',
+                e instanceof Error ? e.message : String(e)
+            );
+            return 'auto';
+        }
+    }
+
+    getSessionAnswerStyle(): InterviewAnswerStyle {
+        return this.sessionAnswerStyleOverride ?? this.getSavedDefaultAnswerStyle();
+    }
+
+    setSessionAnswerStyle(style: InterviewAnswerStyle): InterviewAnswerStyle {
+        try {
+            this.sessionAnswerStyleOverride = normalizeInterviewAnswerStyle(style);
+        } catch {
+            this.sessionAnswerStyleOverride = 'auto';
+        }
+        return this.getSessionAnswerStyle();
+    }
+
+    clearSessionAnswerStyleOverride(): InterviewAnswerStyle {
+        this.sessionAnswerStyleOverride = null;
+        return this.getSessionAnswerStyle();
+    }
+
     // ============================================
     // LLM Initialization
     // ============================================
@@ -386,7 +426,9 @@ export class IntelligenceEngine extends EventEmitter {
         // row is tiny). Null-safe — returns '' when no persona is
         // stored, which WhatToAnswerLLM treats as "skip the block".
         const personaContextFn = buildPersonaContextClosureOrNull();
-        const interviewProfileContextFn = buildInterviewProfileContextClosureOrNull();
+        const interviewProfileContextFn = buildInterviewProfileContextClosureOrNull(
+            () => this.getSessionAnswerStyle()
+        );
         this.knowledgeContextFn = knowledgeContextFn;
         this.personaContextFn = personaContextFn;
         this.interviewProfileContextFn = interviewProfileContextFn;

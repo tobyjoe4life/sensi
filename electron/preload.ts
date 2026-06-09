@@ -19,6 +19,7 @@ interface ProfileContextHealthIpc {
 
 type InterviewSector = 'general' | 'civil_service_public_sector'
 type InterviewStarPolicy = 'detected_competency' | 'always_in_sector' | 'manual'
+type InterviewAnswerStyle = 'auto' | 'concise' | 'elaborate' | 'star'
 
 interface InterviewProfileIpc {
   enabled: boolean
@@ -28,6 +29,7 @@ interface InterviewProfileIpc {
   sector: InterviewSector
   companyFirst: boolean
   starPolicy: InterviewStarPolicy
+  answerStyleDefault: InterviewAnswerStyle
   customNotes: string
 }
 
@@ -391,6 +393,15 @@ interface ElectronAPI {
     | { success: false; error: string }
   >;
   onInterviewProfileChanged?: (callback: (profile: InterviewProfileIpc) => void) => () => void;
+  interviewAnswerStyleGetSession?: () => Promise<
+    | { success: true; style: InterviewAnswerStyle }
+    | { success: false; error: string }
+  >;
+  interviewAnswerStyleSetSession?: (style: InterviewAnswerStyle) => Promise<
+    | { success: true; style: InterviewAnswerStyle }
+    | { success: false; error: string }
+  >;
+  onInterviewAnswerStyleChanged?: (callback: (style: InterviewAnswerStyle) => void) => () => void;
 
   // M5-T5 — Rolling-response trigger mode. Two RPCs + one broadcast.
   setRollingTriggerMode?: (mode: 'off' | 'on-silence' | 'on-demand') => Promise<unknown>;
@@ -1345,6 +1356,17 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.on('interview-profile-changed', listener);
     return () => {
       ipcRenderer.removeListener('interview-profile-changed', listener);
+    };
+  },
+  interviewAnswerStyleGetSession: () =>
+    ipcRenderer.invoke('interview-answer-style:get-session'),
+  interviewAnswerStyleSetSession: (style: InterviewAnswerStyle) =>
+    ipcRenderer.invoke('interview-answer-style:set-session', style),
+  onInterviewAnswerStyleChanged: (callback: (style: InterviewAnswerStyle) => void) => {
+    const listener = (_e: any, style: InterviewAnswerStyle) => callback(style);
+    ipcRenderer.on('interview-answer-style-changed', listener);
+    return () => {
+      ipcRenderer.removeListener('interview-answer-style-changed', listener);
     };
   },
 

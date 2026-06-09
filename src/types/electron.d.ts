@@ -521,6 +521,17 @@ export interface ElectronAPI {
   onInterviewProfileChanged: (
     callback: (profile: InterviewProfileIpc) => void
   ) => () => void
+  interviewAnswerStyleGetSession: () => Promise<
+    | { success: true; style: InterviewAnswerStyleIpc }
+    | { success: false; error: string }
+  >
+  interviewAnswerStyleSetSession: (style: InterviewAnswerStyleIpc) => Promise<
+    | { success: true; style: InterviewAnswerStyleIpc }
+    | { success: false; error: string }
+  >
+  onInterviewAnswerStyleChanged: (
+    callback: (style: InterviewAnswerStyleIpc) => void
+  ) => () => void
 
   // sensi M5-T5 — Rolling-response trigger mode (3 channels)
   //
@@ -637,6 +648,7 @@ export interface ProfileContextHealthIpc {
 
 export type InterviewSectorIpc = 'general' | 'civil_service_public_sector';
 export type InterviewStarPolicyIpc = 'detected_competency' | 'always_in_sector' | 'manual';
+export type InterviewAnswerStyleIpc = 'auto' | 'concise' | 'elaborate' | 'star';
 
 export interface InterviewProfileIpc {
   enabled: boolean;
@@ -646,6 +658,7 @@ export interface InterviewProfileIpc {
   sector: InterviewSectorIpc;
   companyFirst: boolean;
   starPolicy: InterviewStarPolicyIpc;
+  answerStyleDefault: InterviewAnswerStyleIpc;
   customNotes: string;
 }
 

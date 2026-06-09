@@ -1522,6 +1522,8 @@ export class AppState {
     this.isMeetingActive = true;
     this.meetingStartedAt = Date.now();
     this.broadcastMeetingState()
+    const answerStyle = this.intelligenceManager.clearSessionAnswerStyleOverride();
+    this.broadcast('interview-answer-style-changed', answerStyle);
     if (metadata) {
       this.intelligenceManager.setMeetingMetadata(metadata);
     }

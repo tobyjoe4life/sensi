@@ -18,11 +18,13 @@ describe('InterviewProfile', () => {
         const profile = normalizeInterviewProfile({
             sector: 'unknown',
             starPolicy: 'bad',
+            answerStyleDefault: 'verbose',
             targetCompany: '  Cabinet   Office  ',
         });
 
         expect(profile.sector).toBe('civil_service_public_sector');
         expect(profile.starPolicy).toBe('always_in_sector');
+        expect(profile.answerStyleDefault).toBe('auto');
         expect(profile.targetCompany).toBe('Cabinet Office');
     });
 
@@ -51,6 +53,28 @@ describe('InterviewProfile', () => {
         expect(block).toContain('No STAR headings');
     });
 
+    it('emits concise answer guidance when selected', () => {
+        const block = buildInterviewProfileContextBlock(civilProfile, {
+            query: 'Why are you interested in this DWP role?',
+            answerStyleOverride: 'concise',
+        });
+
+        expect(block).toContain('ANSWER MODE: Concise.');
+        expect(block).toContain('1-2 sentence spoken answer');
+        expect(block).toContain('avoid padding');
+    });
+
+    it('emits elaborate answer guidance when selected', () => {
+        const block = buildInterviewProfileContextBlock(civilProfile, {
+            query: 'Tell me about your experience working with stakeholders.',
+            answerStyleOverride: 'elaborate',
+        });
+
+        expect(block).toContain('ANSWER MODE: Elaborate.');
+        expect(block).toContain('45-75 second spoken answer');
+        expect(block).toContain('Success Profiles-style evidence');
+    });
+
     it('does not force rigid STAR for strength-style questions', () => {
         const block = buildInterviewProfileContextBlock(civilProfile, {
             query: 'What strengths energise you at work?',
@@ -74,8 +98,25 @@ describe('InterviewProfile', () => {
         expect(block).not.toContain('Use compact first-person STAR');
     });
 
+    it('forces labelled STAR for technical or coding questions when STAR mode is selected', () => {
+        const block = buildInterviewProfileContextBlock(civilProfile, {
+            query: 'How would you debug a slow API endpoint?',
+            intent: {
+                intent: 'coding',
+                confidence: 0.9,
+                answerShape: 'Provide a technical implementation.',
+            },
+            answerStyleOverride: 'star',
+        });
+
+        expect(block).toContain('ANSWER MODE: STAR.');
+        expect(block).toContain('Force labelled STAR for every answer type');
+        expect(block).toContain('Situation, Task, Action, Result');
+        expect(block).toContain('TECHNICAL MAPPING');
+        expect(block).not.toContain('Do not force STAR');
+    });
+
     it('returns an empty block when disabled', () => {
         expect(buildInterviewProfileContextBlock({ ...civilProfile, enabled: false })).toBe('');
     });
 });
-

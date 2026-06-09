@@ -9,7 +9,7 @@ import {
     Save,
     User,
 } from 'lucide-react';
-import type { InterviewProfileIpc, ProfileContextHealthIpc } from '../../types/electron';
+import type { InterviewAnswerStyleIpc, InterviewProfileIpc, ProfileContextHealthIpc } from '../../types/electron';
 
 const DEFAULT_PROFILE: InterviewProfileIpc = {
     enabled: true,
@@ -19,8 +19,16 @@ const DEFAULT_PROFILE: InterviewProfileIpc = {
     sector: 'civil_service_public_sector',
     companyFirst: true,
     starPolicy: 'always_in_sector',
+    answerStyleDefault: 'auto',
     customNotes: '',
 };
+
+const ANSWER_STYLE_OPTIONS: Array<{ id: InterviewAnswerStyleIpc; label: string }> = [
+    { id: 'auto', label: 'Auto' },
+    { id: 'concise', label: 'Concise' },
+    { id: 'elaborate', label: 'Elaborate' },
+    { id: 'star', label: 'STAR' },
+];
 
 export const InterviewSettings: React.FC = () => {
     const [draft, setDraft] = useState<InterviewProfileIpc>(DEFAULT_PROFILE);
@@ -211,7 +219,25 @@ export const InterviewSettings: React.FC = () => {
 
                         <div>
                             <div className="text-[10px] uppercase tracking-wider text-text-tertiary mb-2">
-                                Answer style
+                                Default answer style
+                            </div>
+                            <div className="flex flex-wrap gap-2">
+                                {ANSWER_STYLE_OPTIONS.map((option) => (
+                                    <button
+                                        key={option.id}
+                                        type="button"
+                                        onClick={() => setField('answerStyleDefault', option.id)}
+                                        className={segmentClass(draft.answerStyleDefault === option.id)}
+                                    >
+                                        {option.label}
+                                    </button>
+                                ))}
+                            </div>
+                        </div>
+
+                        <div>
+                            <div className="text-[10px] uppercase tracking-wider text-text-tertiary mb-2">
+                                Civil Service STAR policy (Auto mode)
                             </div>
                             <div className="flex flex-wrap gap-2">
                                 <button
@@ -236,6 +262,9 @@ export const InterviewSettings: React.FC = () => {
                                     Manual
                                 </button>
                             </div>
+                            <p className="mt-2 text-[11px] text-text-tertiary">
+                                Applies only when the default or live style is Auto.
+                            </p>
                         </div>
 
                         <label className="flex items-center justify-between gap-3 border-t border-border-subtle pt-3">
@@ -307,4 +336,3 @@ const Field: React.FC<{
         />
     </label>
 );
-
