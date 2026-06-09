@@ -17,9 +17,8 @@ export interface ParsedReleaseNotes {
 export class ReleaseNotesManager {
     private static instance: ReleaseNotesManager;
     private cachedNotes: ParsedReleaseNotes | null = null;
-    // sensi M2-T3: updater gated behind SENSI_ENABLE_UPDATER; repo refs neutralized.
-    private readonly repoOwner = "sensi-updater-disabled";
-    private readonly repoName = "sensi-updater-disabled";
+    private readonly repoOwner = "tobyjoe4life";
+    private readonly repoName = "sensi";
 
     private constructor() { }
 

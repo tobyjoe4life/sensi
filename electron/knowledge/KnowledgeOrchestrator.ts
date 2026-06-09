@@ -196,7 +196,7 @@ export interface IngestResult {
     documentId: string;
     chunkCount: number;
     embeddingModel: string;
-    embeddingProvider: 'ollama' | 'gemini';
+    embeddingProvider: 'ollama' | 'gemini' | 'openai';
 }
 
 export interface QueryKnowledgeInput {
@@ -425,7 +425,7 @@ export class KnowledgeOrchestrator {
             //
             // KnowledgeEmbeddingProviderUnavailableError is deliberately
             // passed through unchanged so the `provider_unavailable`
-            // IPC copy ("Start Ollama or add a Gemini API key") still
+            // IPC copy ("Start Ollama or add a Gemini/OpenAI API key") still
             // reaches the user. The same rule applies to
             // KnowledgeEmbeddingModelMismatchError (raced provider
             // swap — see the pre-throw check above) and to
@@ -502,7 +502,7 @@ export class KnowledgeOrchestrator {
                 `queryKnowledge: no documents are embedded with the active model '${config.model}'. ` +
                     `Stored documents use: ${storedModels}. ` +
                     `To query these documents, ensure the matching embedding provider is available at query time ` +
-                    `(start Ollama for nomic-embed-text, or configure a Gemini API key for gemini-embedding-001).`
+                    `(start Ollama for nomic-embed-text, configure a Gemini API key for gemini-embedding-001, or configure an OpenAI API key for text-embedding-3-small).`
             );
         }
 
@@ -629,6 +629,10 @@ export class KnowledgeOrchestrator {
 
     getDocumentText(id: string): string {
         return this.store.getDocumentText(id);
+    }
+
+    resolveEmbeddingProvider(): Promise<EmbeddingConfig> {
+        return this.adapter.resolveProvider();
     }
 
     // ─────────────────────────────────────────────────────────────────

@@ -573,12 +573,12 @@ export class DatabaseManager {
     // are conceptually distinct and must never be confused.
     //
     // Dimension is HARD-CODED to 768 at the vec0 level. This matches both
-    // nomic-embed-text (Ollama, default) and gemini-embedding-001 (Gemini,
-    // via outputDimensionality: 768 per KNOWLEDGE-FIX-02 / D025).
-    // Providers with different native dimensions (OpenAI text-embedding-3-small
-    // at 1536, Claude at varying dims) cannot be used as the knowledge-base
-    // embedder without dimension reduction. The M4-T5 embedding adapter
-    // enforces this and stores the chosen model name in
+    // nomic-embed-text (Ollama, default), gemini-embedding-001 (Gemini),
+    // and text-embedding-3-small (OpenAI) when those cloud providers are
+    // requested with output dimensions pinned to 768. Providers that cannot
+    // emit 768 dims cannot be used as the knowledge-base embedder without
+    // dimension reduction. The M4-T5 embedding adapter enforces this and
+    // stores the chosen model name in
     // `kb_documents.embedding_model` for traceability.
     //
     // Idempotent: all three DDL statements use IF NOT EXISTS. Safe to call

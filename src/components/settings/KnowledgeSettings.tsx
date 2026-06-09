@@ -45,6 +45,7 @@ import {
 import type {
     KnowledgeDocumentMetadata,
     KnowledgeIpcErrorType,
+    ProfileContextHealthIpc,
 } from '../../types/electron';
 import { errorTypeToMessage } from '../../lib/knowledgeErrors';
 
@@ -85,6 +86,7 @@ function formatBytes(bytes: number): string {
 function shortProvider(model: string): string {
     if (model.startsWith('nomic-embed-text')) return 'Ollama / nomic-embed-text';
     if (model.startsWith('gemini-embedding-001')) return 'Gemini / gemini-embedding-001';
+    if (model.startsWith('text-embedding-3-small')) return 'OpenAI / text-embedding-3-small';
     // Legacy label: pre-KNOWLEDGE-FIX-02 documents may still carry the
     // older text-embedding-004 model name. Kept so the list view shows
     // a friendly label for those rows until they are re-ingested.
@@ -106,16 +108,34 @@ export const KnowledgeSettings: React.FC = () => {
     const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
     const [manualPath, setManualPath] = useState('');
     const [transferStatus, setTransferStatus] = useState<TransferStatus | null>(null);
+    const [profileHealth, setProfileHealth] = useState<ProfileContextHealthIpc | null>(null);
 
     // ─── Data loading ───────────────────────────────────────────────
     const refreshList = useCallback(async () => {
         setBusy('refresh');
         setUiError(null);
         try {
-            const [docsRes, pinnedRes] = await Promise.all([
+            const [docsRes, pinnedRes, healthRes] = await Promise.all([
                 window.electronAPI.knowledgeListDocuments(),
                 window.electronAPI.knowledgeListPinned(),
+                window.electronAPI.profileContextHealth?.(),
             ]);
+
+            if (healthRes?.success) {
+                setProfileHealth(healthRes.health);
+            } else if (healthRes && !healthRes.success) {
+                setProfileHealth({
+                    dbReady: false,
+                    personaBound: false,
+                    personaPresent: false,
+                    knowledgeDocumentCount: 0,
+                    pinnedKnowledgeCount: 0,
+                    embeddingProvider: null,
+                    embeddingModel: null,
+                    embeddingReady: false,
+                    error: healthRes.error,
+                });
+            }
 
             if (!docsRes.success) {
                 setUiError({ errorType: docsRes.errorType, context: 'Load documents' });
@@ -168,12 +188,14 @@ export const KnowledgeSettings: React.FC = () => {
     );
 
     const onClickImport = useCallback(async () => {
-        // Reuse the existing main-process file picker. Its current filter
-        // covers pdf/docx/txt — see DECISIONS.md D022 for why .md files
-        // fall through the filter and must be added via the manual-path
-        // fallback below.
-        const pickResult = await window.electronAPI.profileSelectFile();
-        if (!pickResult || pickResult.cancelled || !pickResult.filePath) return;
+        // Use the knowledge-specific picker so every supported document
+        // type goes through the same ingestion path.
+        const pickResult = await window.electronAPI.knowledgePickDocument();
+        if (!pickResult || pickResult.cancelled) return;
+        if (!pickResult.filePath) {
+            setUiError({ errorType: 'invalid_input', context: 'Choose file' });
+            return;
+        }
         await runIngest(pickResult.filePath);
     }, [runIngest]);
 
@@ -348,6 +370,25 @@ export const KnowledgeSettings: React.FC = () => {
                     Refresh
                 </button>
             </div>
+
+            {profileHealth && (
+                <div className="flex flex-wrap items-center gap-2 text-[11px] text-text-secondary">
+                    <span className={profileHealth.dbReady ? 'text-emerald-300' : 'text-red-300'}>
+                        DB {profileHealth.dbReady ? 'ready' : 'offline'}
+                    </span>
+                    <span>Persona {profileHealth.personaPresent ? 'loaded' : 'missing'}</span>
+                    <span>Docs {profileHealth.knowledgeDocumentCount}</span>
+                    <span>Pinned {profileHealth.pinnedKnowledgeCount}</span>
+                    <span className={profileHealth.embeddingReady ? 'text-emerald-300' : 'text-amber-300'}>
+                        Embed {profileHealth.embeddingProvider ?? 'unavailable'}
+                    </span>
+                    {profileHealth.error && (
+                        <span className="text-amber-300 truncate max-w-full" title={profileHealth.error}>
+                            {profileHealth.error}
+                        </span>
+                    )}
+                </div>
+            )}
 
             {/* Error banner */}
             {uiError && (

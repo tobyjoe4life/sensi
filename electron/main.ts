@@ -2802,19 +2802,17 @@ async function initializeApp() {
   // LLMHelper so the persona's resume-extract call routes through
   // whichever provider the user has configured.
   try {
-    const { PersonaManager } = require('./persona/PersonaManager') as typeof import('./persona/PersonaManager');
-    const db = DatabaseManager.getInstance().getDb();
-    if (db) {
-      PersonaManager.getInstance().bind({
-        db: db as any,
+    const {
+      bindPersonaManagerFromDatabase,
+    } = require('./persona/personaRuntime') as typeof import('./persona/personaRuntime');
+    bindPersonaManagerFromDatabase({
         llmHelperProvider: () => appState.processingHelper?.getLLMHelper?.() ?? null,
-      });
-      console.log('[Main] PersonaManager initialized');
-    } else {
-      console.warn('[Main] PersonaManager: DatabaseManager has no live handle yet');
-    }
+    });
+    console.log('[Main] PersonaManager initialized');
   } catch (err) {
-    console.error('[Main] Failed to initialize PersonaManager:', err);
+    const { getPersonaRuntimeErrorMessage } =
+      require('./persona/personaRuntime') as typeof import('./persona/personaRuntime');
+    console.error('[Main] Failed to initialize PersonaManager:', getPersonaRuntimeErrorMessage(err));
   }
 
   // Recover unprocessed meetings (persistence check)

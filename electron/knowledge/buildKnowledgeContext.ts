@@ -226,7 +226,7 @@ function buildPinnedBlock(
 //   - Catch typed errors and degrade: model mismatch / provider
 //     unavailable return empty block + warning, unknown errors also
 //     return empty block + warning.
-//   - Filter out chunks from pinned documents (dedup against pinned block).
+//   - Restrict retrieval to pinned documents only.
 //   - Truncate each chunk to `maxCharsPerChunk`.
 //   - Stop adding once total exceeds `maxTotalChars`.
 // ─────────────────────────────────────────────────────────────────────────
@@ -247,16 +247,19 @@ async function buildRetrievedBlock(
         : rawQuery;
     const query = queryTail.trim();
     if (query.length === 0) return '';
+    if (pinnedIds.size === 0) return '';
+
+    const allowedDocumentIds = Array.from(pinnedIds);
 
     let hits: RetrievedChunk[];
     try {
         hits = await orchestrator.queryKnowledge({
             query,
             topK,
-            // includePinned: false — pinned docs are injected separately
-            // via the pinned block, and we filter pinned-doc hits out
-            // below to avoid double injection.
+            // keep queryKnowledge's pinned sort disabled; documentIds already scopes it.
+            // Manual-pin policy: only pinned docs can enter the prompt.
             includePinned: false,
+            documentIds: allowedDocumentIds,
             // sensi M7 / KNOWLEDGE-02: when set, retrieval prefers docs
             // attached to this event and short-circuits if it finds any.
             eventId,
@@ -276,9 +279,9 @@ async function buildRetrievedBlock(
 
     if (hits.length === 0) return '';
 
-    // Filter out hits that come from a pinned doc (pinned block already
-    // covers them — see dedup rule in D020).
-    const filtered = hits.filter((h) => !pinnedIds.has(h.documentId));
+    // Defensive guard in case a test double or future store ignores the
+    // documentIds filter.
+    const filtered = hits.filter((h) => pinnedIds.has(h.documentId));
     if (filtered.length === 0) return '';
 
     const entries: string[] = [];

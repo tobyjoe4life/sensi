@@ -217,7 +217,7 @@ export class DeepgramStreamingSTT extends EventEmitter {
         // was splitting natural questions on mid-sentence thinking pauses
         // ("Tell me about a time… [800 ms thinking] …you led a team") into
         // two separate finals, which fed the auto-answer a fragment and
-        // produced "Take your time." spam. 1500 ms keeps the segment
+        // produced waiting-response spam. 1500 ms keeps the segment
         // coalesced through normal thinking pauses while still finalizing
         // promptly when the speaker truly stops.
         //

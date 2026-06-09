@@ -5,6 +5,32 @@ import { contextBridge, ipcRenderer } from "electron"
 // Vite alias — see vite.config.mts.
 import type { ProviderId, ProviderStatus } from "./providers/types"
 
+interface ProfileContextHealthIpc {
+  dbReady: boolean
+  personaBound: boolean
+  personaPresent: boolean
+  knowledgeDocumentCount: number
+  pinnedKnowledgeCount: number
+  embeddingProvider: 'ollama' | 'gemini' | 'openai' | null
+  embeddingModel: string | null
+  embeddingReady: boolean
+  error: string | null
+}
+
+type InterviewSector = 'general' | 'civil_service_public_sector'
+type InterviewStarPolicy = 'detected_competency' | 'always_in_sector' | 'manual'
+
+interface InterviewProfileIpc {
+  enabled: boolean
+  targetCompany: string
+  targetRole: string
+  targetGradeOrLevel: string
+  sector: InterviewSector
+  companyFirst: boolean
+  starPolicy: InterviewStarPolicy
+  customNotes: string
+}
+
 // Types for the exposed Electron API
 interface ElectronAPI {
   updateContentDimensions: (dimensions: {
@@ -202,7 +228,7 @@ interface ElectronAPI {
   onOverlayMousePassthroughChanged: (callback: (enabled: boolean) => void) => () => void
 
   // Streaming listeners
-  streamGeminiChat: (message: string, imagePaths?: string[], context?: string, options?: { skipSystemPrompt?: boolean, ignoreKnowledgeMode?: boolean }) => Promise<void>
+  streamGeminiChat: (message: string, imagePaths?: string[], context?: string, options?: { skipSystemPrompt?: boolean, ignoreKnowledgeMode?: boolean, useInterviewContext?: boolean }) => Promise<void>
   onGeminiStreamToken: (callback: (token: string) => void) => () => void
   onGeminiStreamDone: (callback: () => void) => () => void
   onGeminiStreamError: (callback: (error: string) => void) => () => void
@@ -341,16 +367,30 @@ interface ElectronAPI {
 
   // M4-T10 — Knowledge export/import. Four channels; see comments
   // on the implementation below and DECISIONS.md D023.
+  knowledgePickDocument?: () => Promise<unknown>;
   knowledgeExport?: (filePath: string) => Promise<unknown>;
   knowledgeImport?: (filePath: string) => Promise<unknown>;
   knowledgePickExportPath?: () => Promise<unknown>;
   knowledgePickImportPath?: () => Promise<unknown>;
 
   // sensi M7 / PERSONA-01 — lightweight resume persona
+  profileContextHealth?: () => Promise<
+    | { success: true; health: ProfileContextHealthIpc }
+    | { success: false; error: string }
+  >;
   personaPickFile?: () => Promise<unknown>;
   personaUploadResume?: (filePath: string) => Promise<unknown>;
   personaGetSummary?: () => Promise<unknown>;
   personaClear?: () => Promise<unknown>;
+  interviewProfileGet?: () => Promise<
+    | { success: true; profile: InterviewProfileIpc }
+    | { success: false; error: string }
+  >;
+  interviewProfileSet?: (profilePatch: Partial<InterviewProfileIpc>) => Promise<
+    | { success: true; profile: InterviewProfileIpc }
+    | { success: false; error: string }
+  >;
+  onInterviewProfileChanged?: (callback: (profile: InterviewProfileIpc) => void) => () => void;
 
   // M5-T5 — Rolling-response trigger mode. Two RPCs + one broadcast.
   setRollingTriggerMode?: (mode: 'off' | 'on-silence' | 'on-demand') => Promise<unknown>;
@@ -885,7 +925,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
 
 
   // Streaming Chat
-  streamGeminiChat: (message: string, imagePaths?: string[], context?: string, options?: { skipSystemPrompt?: boolean, ignoreKnowledgeMode?: boolean }) => ipcRenderer.invoke("gemini-chat-stream", message, imagePaths, context, options),
+  streamGeminiChat: (message: string, imagePaths?: string[], context?: string, options?: { skipSystemPrompt?: boolean, ignoreKnowledgeMode?: boolean, useInterviewContext?: boolean }) => ipcRenderer.invoke("gemini-chat-stream", message, imagePaths, context, options),
 
   onGeminiStreamToken: (callback: (token: string) => void) => {
     const subscription = (_: any, token: string) => callback(token)
@@ -1256,6 +1296,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
   // See DECISIONS.md D021.
   knowledgeIngestDocument: (filePath: string) =>
     ipcRenderer.invoke('knowledge-ingest-document', filePath),
+  knowledgePickDocument: () =>
+    ipcRenderer.invoke('knowledge-pick-document'),
   knowledgeListDocuments: () =>
     ipcRenderer.invoke('knowledge-list-documents'),
   knowledgeDeleteDocument: (id: string) =>
@@ -1290,10 +1332,21 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.invoke('knowledge-pick-import-path'),
 
   // sensi M7 / PERSONA-01 — lightweight resume persona
+  profileContextHealth: () => ipcRenderer.invoke('profile-context:health'),
   personaPickFile: () => ipcRenderer.invoke('persona:pick-file'),
   personaUploadResume: (filePath: string) => ipcRenderer.invoke('persona:upload-resume', filePath),
   personaGetSummary: () => ipcRenderer.invoke('persona:get-summary'),
   personaClear: () => ipcRenderer.invoke('persona:clear'),
+  interviewProfileGet: () => ipcRenderer.invoke('interview-profile:get'),
+  interviewProfileSet: (profilePatch: Partial<InterviewProfileIpc>) =>
+    ipcRenderer.invoke('interview-profile:set', profilePatch),
+  onInterviewProfileChanged: (callback: (profile: InterviewProfileIpc) => void) => {
+    const listener = (_e: any, profile: InterviewProfileIpc) => callback(profile);
+    ipcRenderer.on('interview-profile-changed', listener);
+    return () => {
+      ipcRenderer.removeListener('interview-profile-changed', listener);
+    };
+  },
 
   // sensi M5-T5 — Rolling-response trigger mode (two channels, persisted via SettingsManager)
   setRollingTriggerMode: (mode: 'off' | 'on-silence' | 'on-demand') =>

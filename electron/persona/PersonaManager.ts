@@ -93,6 +93,10 @@ export class PersonaManager {
         this.llmHelperProvider = deps.llmHelperProvider;
     }
 
+    public isBound(): boolean {
+        return this.db !== null;
+    }
+
     // ─────────────────────────────────────────────────────────────────
     // Queries
     // ─────────────────────────────────────────────────────────────────

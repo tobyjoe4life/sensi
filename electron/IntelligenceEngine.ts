@@ -9,7 +9,8 @@ import {
     AnswerLLM, AssistLLM, BrainstormLLM, ClarifyLLM, CodeHintLLM, FollowUpLLM, RecapLLM,
     FollowUpQuestionsLLM, WhatToAnswerLLM,
     prepareTranscriptForWhatToAnswer, buildTemporalContext,
-    AssistantResponse as LLMAssistantResponse, classifyIntent
+    AssistantResponse as LLMAssistantResponse, classifyIntent,
+    type IntentResult
 } from './llm';
 import { RollingTriggerPolicy, RollingTriggerMode, isValidRollingTriggerMode } from './llm/RollingTriggerPolicy';
 
@@ -61,6 +62,28 @@ function buildPersonaContextClosureOrNull(): ((eventId?: string) => string) | nu
     } catch (e) {
         console.warn(
             '[IntelligenceEngine] Persona context closure unavailable, live-assist will run without persona hook:',
+            e instanceof Error ? e.message : String(e)
+        );
+        return null;
+    }
+}
+
+/**
+ * Interview profile context is a typed user preference block: target
+ * company/role first, then sector answer policy. It is intentionally
+ * separate from persona and knowledge so generic chat/summary flows stay
+ * unpolluted unless the caller opted into interview context.
+ */
+function buildInterviewProfileContextClosureOrNull(): ((query: string, intent?: IntentResult) => string) | null {
+    try {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const { buildInterviewProfileContextBlock } =
+            require('./interview/InterviewProfile') as typeof import('./interview/InterviewProfile');
+        return (query: string, intent?: IntentResult) =>
+            buildInterviewProfileContextBlock(undefined, { query, intent });
+    } catch (e) {
+        console.warn(
+            '[IntelligenceEngine] Interview profile context closure unavailable, live-assist will run without interview profile:',
             e instanceof Error ? e.message : String(e)
         );
         return null;
@@ -146,6 +169,10 @@ export class IntelligenceEngine extends EventEmitter {
     private whatToAnswerLLM: WhatToAnswerLLM | null = null;
     private codeHintLLM: CodeHintLLM | null = null;
     private brainstormLLM: BrainstormLLM | null = null;
+    private knowledgeContextFn: ((query: string, eventId?: string) => Promise<string>) | null = null;
+    private personaContextFn: ((eventId?: string) => string) | null = null;
+    private interviewProfileContextFn: ((query: string, intent?: IntentResult) => string) | null = null;
+    private activeEventId: string | null = null;
 
     // Concurrency tracking
     private assistCancellationToken: AbortController | null = null;
@@ -359,10 +386,15 @@ export class IntelligenceEngine extends EventEmitter {
         // row is tiny). Null-safe — returns '' when no persona is
         // stored, which WhatToAnswerLLM treats as "skip the block".
         const personaContextFn = buildPersonaContextClosureOrNull();
+        const interviewProfileContextFn = buildInterviewProfileContextClosureOrNull();
+        this.knowledgeContextFn = knowledgeContextFn;
+        this.personaContextFn = personaContextFn;
+        this.interviewProfileContextFn = interviewProfileContextFn;
         this.whatToAnswerLLM = new WhatToAnswerLLM(
             this.llmHelper,
             knowledgeContextFn ?? undefined,
-            personaContextFn ?? undefined
+            personaContextFn ?? undefined,
+            interviewProfileContextFn ?? undefined
         );
 
         this.codeHintLLM = new CodeHintLLM(this.llmHelper);
@@ -383,7 +415,74 @@ export class IntelligenceEngine extends EventEmitter {
      * IntelligenceManager calls this whenever meeting metadata is set.
      */
     setActiveEventId(eventId: string | null): void {
+        this.activeEventId = eventId;
         this.whatToAnswerLLM?.setActiveEventId(eventId);
+    }
+
+    private async buildLiveProfileContext(query: string, intent?: IntentResult): Promise<string> {
+        const parts: string[] = [];
+
+        if (this.interviewProfileContextFn) {
+            try {
+                const interviewBlock = this.interviewProfileContextFn(query, intent);
+                if (interviewBlock && interviewBlock.trim().length > 0) {
+                    parts.push(interviewBlock);
+                }
+            } catch (e) {
+                console.warn(
+                    '[IntelligenceEngine] interview profile context unavailable for live mode:',
+                    e instanceof Error ? e.message : String(e)
+                );
+            }
+        }
+
+        if (this.personaContextFn) {
+            try {
+                const personaBlock = this.personaContextFn(this.activeEventId ?? undefined);
+                if (personaBlock && personaBlock.trim().length > 0) {
+                    parts.push(personaBlock);
+                }
+            } catch (e) {
+                console.warn(
+                    '[IntelligenceEngine] persona context unavailable for live mode:',
+                    e instanceof Error ? e.message : String(e)
+                );
+            }
+        }
+
+        if (this.knowledgeContextFn) {
+            try {
+                const knowledgeBlock = await this.knowledgeContextFn(
+                    query,
+                    this.activeEventId ?? undefined
+                );
+                if (knowledgeBlock && knowledgeBlock.trim().length > 0) {
+                    parts.push(knowledgeBlock);
+                }
+            } catch (e) {
+                console.warn(
+                    '[IntelligenceEngine] knowledge context unavailable for live mode:',
+                    e instanceof Error ? e.message : String(e)
+                );
+            }
+        }
+
+        return parts.join('\n\n');
+    }
+
+    private async enrichContextWithLiveProfile(
+        context: string,
+        queryHint?: string,
+        intent?: IntentResult
+    ): Promise<string> {
+        const query = [queryHint, context]
+            .filter((part): part is string => typeof part === 'string' && part.trim().length > 0)
+            .join('\n\n');
+        const profileContext = await this.buildLiveProfileContext(query, intent);
+        if (!profileContext) return context;
+        return context && context.trim().length > 0
+            ? `${profileContext}\n\n${context}`
+            : profileContext;
     }
 
     // ============================================
@@ -985,7 +1084,13 @@ export class IntelligenceEngine extends EventEmitter {
                 return null;
             }
 
-            const context = this.session.getFormattedContext(120);
+            const baseContext = this.session.getFormattedContext(120);
+            const intentResult = await classifyIntent(
+                question,
+                [baseContext, question].filter(Boolean).join('\n'),
+                this.session.getAssistantResponseHistory().length
+            );
+            const context = await this.enrichContextWithLiveProfile(baseContext, question, intentResult);
             const answer = await this.answerLLM.generate(question, context);
 
             if (answer) {
@@ -1121,6 +1226,10 @@ export class IntelligenceEngine extends EventEmitter {
             if (resolvedProblem) {
                 context = `<problem_statement>\n${resolvedProblem}\n</problem_statement>\n\n${context}`;
             }
+            context = await this.enrichContextWithLiveProfile(
+                context,
+                resolvedProblem || 'Brainstorm approaches for the current interview question'
+            );
             const generationId = ++this.currentGenerationId;
             let fullResult = "";
             const stream = this.brainstormLLM.generateStream(context, imagePaths);

@@ -1453,7 +1453,7 @@ Provide only the answer, nothing else.`;
 
                 // Call Streaming API: message = question, context = instructions
                 requestStartTimeRef.current = Date.now();
-                await window.electronAPI.streamGeminiChat(question, currentAttachments.length > 0 ? currentAttachments.map(s => s.path) : undefined, prompt, { skipSystemPrompt: true });
+                await window.electronAPI.streamGeminiChat(question, currentAttachments.length > 0 ? currentAttachments.map(s => s.path) : undefined, prompt, { useInterviewContext: true });
 
             } catch (err) {
                 // Initial invocation failing (e.g. IPC error before stream starts)
@@ -1543,7 +1543,8 @@ Provide only the answer, nothing else.`;
             await window.electronAPI.streamGeminiChat(
                 userText || 'Analyze this screenshot',
                 currentAttachments.length > 0 ? currentAttachments.map(s => s.path) : undefined,
-                conversationContext // Pass context so "answer this" works
+                conversationContext, // Pass context so "answer this" works
+                { useInterviewContext: true }
             );
         } catch (err) {
             setIsProcessing(false);

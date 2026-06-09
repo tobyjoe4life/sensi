@@ -198,7 +198,7 @@ export interface ElectronAPI {
   onRollingStreamCancelled: (callback: () => void) => () => void;
 
   // Streaming listeners
-  streamGeminiChat: (message: string, imagePaths?: string[], context?: string, options?: { skipSystemPrompt?: boolean, ignoreKnowledgeMode?: boolean }) => Promise<void>
+  streamGeminiChat: (message: string, imagePaths?: string[], context?: string, options?: { skipSystemPrompt?: boolean, ignoreKnowledgeMode?: boolean, useInterviewContext?: boolean }) => Promise<void>
   onGeminiStreamToken: (callback: (token: string) => void) => () => void
   onGeminiStreamDone: (callback: () => void) => () => void
   onGeminiStreamError: (callback: (error: string) => void) => () => void;
@@ -408,9 +408,14 @@ export interface ElectronAPI {
         documentId: string;
         chunkCount: number;
         embeddingModel: string;
-        embeddingProvider: 'ollama' | 'gemini';
+        embeddingProvider: 'ollama' | 'gemini' | 'openai';
       }
     | KnowledgeIpcFailure
+  >;
+  knowledgePickDocument: () => Promise<
+    | { cancelled: true }
+    | { cancelled: false; filePath: string; error?: undefined }
+    | { cancelled: false; filePath?: undefined; error: string }
   >;
   knowledgeListDocuments: () => Promise<
     | { success: true; documents: KnowledgeDocumentMetadata[] }
@@ -485,6 +490,10 @@ export interface ElectronAPI {
   >;
 
   // sensi M7 / PERSONA-01 — lightweight resume persona.
+  profileContextHealth: () => Promise<
+    | { success: true; health: ProfileContextHealthIpc }
+    | { success: false; error: string }
+  >
   personaPickFile: () => Promise<
     | { cancelled: true; filePath?: undefined }
     | { cancelled: false; filePath: string; error?: undefined }
@@ -501,6 +510,17 @@ export interface ElectronAPI {
   personaClear: () => Promise<
     { success: true } | { success: false; error: string }
   >
+  interviewProfileGet: () => Promise<
+    | { success: true; profile: InterviewProfileIpc }
+    | { success: false; error: string }
+  >
+  interviewProfileSet: (profilePatch: Partial<InterviewProfileIpc>) => Promise<
+    | { success: true; profile: InterviewProfileIpc }
+    | { success: false; error: string }
+  >
+  onInterviewProfileChanged: (
+    callback: (profile: InterviewProfileIpc) => void
+  ) => () => void
 
   // sensi M5-T5 — Rolling-response trigger mode (3 channels)
   //
@@ -601,6 +621,32 @@ export interface KnowledgeDocumentMetadata {
   pinnedAt: string | null;
   ingestedAt: string;
   chunkCount: number;
+}
+
+export interface ProfileContextHealthIpc {
+  dbReady: boolean;
+  personaBound: boolean;
+  personaPresent: boolean;
+  knowledgeDocumentCount: number;
+  pinnedKnowledgeCount: number;
+  embeddingProvider: 'ollama' | 'gemini' | 'openai' | null;
+  embeddingModel: string | null;
+  embeddingReady: boolean;
+  error: string | null;
+}
+
+export type InterviewSectorIpc = 'general' | 'civil_service_public_sector';
+export type InterviewStarPolicyIpc = 'detected_competency' | 'always_in_sector' | 'manual';
+
+export interface InterviewProfileIpc {
+  enabled: boolean;
+  targetCompany: string;
+  targetRole: string;
+  targetGradeOrLevel: string;
+  sector: InterviewSectorIpc;
+  companyFirst: boolean;
+  starPolicy: InterviewStarPolicyIpc;
+  customNotes: string;
 }
 
 /**

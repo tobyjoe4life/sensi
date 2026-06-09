@@ -7,6 +7,7 @@ import { DatabaseManager } from "./db/DatabaseManager"; // Import Database Manag
 import * as path from "path";
 import * as fs from "fs";
 import { AudioDevices } from "./audio/AudioDevices";
+import { UNIVERSAL_ANSWER_PROMPT } from "./llm/prompts";
 
 
 import { RECOGNITION_LANGUAGES, AI_RESPONSE_LANGUAGES } from "./config/languages"
@@ -25,6 +26,86 @@ export function initializeIpcHandlers(appState: AppState): void {
    */
   const isProOrTrialActive = (): boolean => {
     return true;
+  };
+
+  const ensurePersonaManager = (): import('./persona/PersonaManager').PersonaManager => {
+    const { bindPersonaManagerFromDatabase } =
+      require('./persona/personaRuntime') as typeof import('./persona/personaRuntime');
+    return bindPersonaManagerFromDatabase({
+      llmHelperProvider: () => appState.processingHelper?.getLLMHelper?.() ?? null,
+    });
+  };
+
+  const formatPersonaError = (error: unknown, fallback: string): string => {
+    const { getPersonaRuntimeErrorMessage } =
+      require('./persona/personaRuntime') as typeof import('./persona/personaRuntime');
+    return getPersonaRuntimeErrorMessage(error, fallback);
+  };
+
+  const buildLiveProfileContextForChat = async (
+    message: string,
+    context?: string
+  ): Promise<string> => {
+    const parts: string[] = [];
+    const query = [message, context]
+      .filter((part): part is string => typeof part === 'string' && part.trim().length > 0)
+      .join('\n\n');
+
+    try {
+      const { buildInterviewProfileContextBlock } =
+        require('./interview/InterviewProfile') as typeof import('./interview/InterviewProfile');
+      const interviewBlock = buildInterviewProfileContextBlock(undefined, { query });
+      if (interviewBlock && interviewBlock.trim().length > 0) {
+        parts.push(interviewBlock);
+      }
+    } catch (e) {
+      console.warn(
+        '[IPC] interview profile context unavailable for chat stream:',
+        e instanceof Error ? e.message : String(e)
+      );
+    }
+
+    try {
+      const personaBlock = ensurePersonaManager().buildContextBlock(null);
+      if (personaBlock && personaBlock.trim().length > 0) {
+        parts.push(personaBlock);
+      }
+    } catch (e) {
+      console.warn(
+        '[IPC] persona context unavailable for chat stream:',
+        formatPersonaError(e, 'Persona context unavailable.')
+      );
+    }
+
+    try {
+      const { buildKnowledgeContextBlock } =
+        require('./knowledge/buildKnowledgeContext') as typeof import('./knowledge/buildKnowledgeContext');
+      const knowledgeBlock = await buildKnowledgeContextBlock({
+        orchestrator: DatabaseManager.getInstance().getKnowledgeOrchestrator(),
+        query,
+      });
+      if (knowledgeBlock && knowledgeBlock.trim().length > 0) {
+        parts.push(knowledgeBlock);
+      }
+    } catch (e) {
+      console.warn(
+        '[IPC] knowledge context unavailable for chat stream:',
+        e instanceof Error ? e.message : String(e)
+      );
+    }
+
+    return parts.join('\n\n');
+  };
+
+  const enrichChatContextWithLiveProfile = async (
+    message: string,
+    context?: string
+  ): Promise<string | undefined> => {
+    const profileContext = await buildLiveProfileContextForChat(message, context);
+    if (!profileContext) return context;
+    return context && context.trim().length > 0
+      ? `${profileContext}\n\n${context}`
+      : profileContext;
   };
 
   // --- NEW Test Helper ---
@@ -348,9 +429,22 @@ export function initializeIpcHandlers(appState: AppState): void {
     }
   })
 
-  safeHandle("gemini-chat", async (event, message: string, imagePaths?: string[], context?: string, options?: { skipSystemPrompt?: boolean }) => {
+  safeHandle("gemini-chat", async (event, message: string, imagePaths?: string[], context?: string, options?: { skipSystemPrompt?: boolean, useInterviewContext?: boolean }) => {
     try {
-      const result = await appState.processingHelper.getLLMHelper().chatWithGemini(message, imagePaths, context, options?.skipSystemPrompt);
+      if (options?.useInterviewContext) {
+        context = await enrichChatContextWithLiveProfile(message, context);
+      }
+      let result: string;
+      if (options?.useInterviewContext && !options?.skipSystemPrompt) {
+        let collected = "";
+        const stream = appState.processingHelper
+          .getLLMHelper()
+          .streamChat(message, imagePaths, context, UNIVERSAL_ANSWER_PROMPT, true);
+        for await (const token of stream) collected += token;
+        result = collected.trim();
+      } else {
+        result = await appState.processingHelper.getLLMHelper().chatWithGemini(message, imagePaths, context, options?.skipSystemPrompt);
+      }
 
       console.log(`[IPC] gemini - chat response: `, result ? result.substring(0, 50) : "(empty)");
 
@@ -394,7 +488,7 @@ export function initializeIpcHandlers(appState: AppState): void {
   // that a newer stream has taken over.
   let _chatStreamId = 0;
 
-  safeHandle("gemini-chat-stream", async (event, message: string, imagePaths?: string[], context?: string, options?: { skipSystemPrompt?: boolean, ignoreKnowledgeMode?: boolean }) => {
+  safeHandle("gemini-chat-stream", async (event, message: string, imagePaths?: string[], context?: string, options?: { skipSystemPrompt?: boolean, ignoreKnowledgeMode?: boolean, useInterviewContext?: boolean }) => {
     try {
       console.log("[IPC] gemini-chat-stream started using LLMHelper.streamChat");
       const llmHelper = appState.processingHelper.getLLMHelper();
@@ -428,9 +522,19 @@ export function initializeIpcHandlers(appState: AppState): void {
         }
       }
 
+      if (options?.useInterviewContext) {
+        context = await enrichChatContextWithLiveProfile(message, context);
+      }
+
       try {
         // USE streamChat which handles routing
-        const stream = llmHelper.streamChat(message, imagePaths, context, options?.skipSystemPrompt ? "" : undefined, options?.ignoreKnowledgeMode);
+        const systemPromptOverride = options?.skipSystemPrompt
+          ? ""
+          : options?.useInterviewContext
+            ? UNIVERSAL_ANSWER_PROMPT
+            : undefined;
+        const ignoreKnowledgeMode = options?.ignoreKnowledgeMode ?? options?.useInterviewContext === true;
+        const stream = llmHelper.streamChat(message, imagePaths, context, systemPromptOverride, ignoreKnowledgeMode);
 
         for await (const token of stream) {
           // Bail if a newer stream has taken over (user triggered a new request)
@@ -2316,6 +2420,28 @@ export function initializeIpcHandlers(appState: AppState): void {
     return { success: true };
   });
 
+  safeHandle("interview-profile:get", () => {
+    try {
+      const { getInterviewProfile } =
+        require('./interview/InterviewProfile') as typeof import('./interview/InterviewProfile');
+      return { success: true, profile: getInterviewProfile() };
+    } catch (error: any) {
+      return { success: false, error: error?.message ?? 'Failed to read interview profile.' };
+    }
+  });
+
+  safeHandle("interview-profile:set", (_, profilePatch: unknown) => {
+    try {
+      const { updateInterviewProfile, broadcastInterviewProfileChanged } =
+        require('./interview/InterviewProfile') as typeof import('./interview/InterviewProfile');
+      const profile = updateInterviewProfile(profilePatch);
+      broadcastInterviewProfileChanged(profile);
+      return { success: true, profile };
+    } catch (error: any) {
+      return { success: false, error: error?.message ?? 'Failed to save interview profile.' };
+    }
+  });
+
   // MODE 3: Follow-Up (Refinement)
   safeHandle("generate-follow-up", async (_, intent: string, userRequest?: string) => {
     try {
@@ -3268,6 +3394,23 @@ export function initializeIpcHandlers(appState: AppState): void {
     return DatabaseManager.getInstance().getKnowledgeOrchestrator();
   };
 
+  safeHandle("knowledge-pick-document", async () => {
+    try {
+      const result: any = await dialog.showOpenDialog({
+        properties: ['openFile'],
+        filters: [
+          { name: 'Knowledge Documents', extensions: ['pdf', 'docx', 'md', 'markdown', 'txt'] },
+        ],
+      });
+      if (result?.canceled || !result?.filePaths || result.filePaths.length === 0) {
+        return { cancelled: true };
+      }
+      return { cancelled: false, filePath: result.filePaths[0] };
+    } catch (error: any) {
+      return { cancelled: false, error: error?.message ?? 'Failed to open file dialog.' };
+    }
+  });
+
   safeHandle("knowledge-ingest-document", async (_, filePath: unknown) => {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { handleIngestDocument } = require('./knowledge/knowledgeIpcHelpers') as typeof import('./knowledge/knowledgeIpcHelpers');
@@ -3327,6 +3470,22 @@ export function initializeIpcHandlers(appState: AppState): void {
   // (hidden, zombie) Profile Intelligence `profile:*` handlers.
   // ==========================================
 
+  safeHandle("profile-context:health", async () => {
+    try {
+      const { getProfileContextHealth } =
+        require('./persona/personaRuntime') as typeof import('./persona/personaRuntime');
+      const health = await getProfileContextHealth({
+        llmHelperProvider: () => appState.processingHelper?.getLLMHelper?.() ?? null,
+      });
+      return { success: true, health };
+    } catch (error: any) {
+      return {
+        success: false,
+        error: formatPersonaError(error, 'Failed to read persona and knowledge health.'),
+      };
+    }
+  });
+
   safeHandle("persona:pick-file", async () => {
     try {
       // Cast to any to bypass the older overload that returns string[].
@@ -3350,32 +3509,29 @@ export function initializeIpcHandlers(appState: AppState): void {
       if (typeof filePath !== 'string' || !filePath.trim()) {
         return { success: false, error: 'filePath is required' };
       }
-      const { PersonaManager } = require('./persona/PersonaManager') as typeof import('./persona/PersonaManager');
-      const summary = await PersonaManager.getInstance().uploadResume(filePath);
+      const summary = await ensurePersonaManager().uploadResume(filePath);
       return { success: true, summary };
     } catch (error: any) {
       console.error('[IPC] persona:upload-resume error:', error);
-      return { success: false, error: error?.message ?? 'Failed to process resume.' };
+      return { success: false, error: formatPersonaError(error, 'Failed to process resume.') };
     }
   });
 
   safeHandle("persona:get-summary", async () => {
     try {
-      const { PersonaManager } = require('./persona/PersonaManager') as typeof import('./persona/PersonaManager');
-      const summary = PersonaManager.getInstance().getLatest('resume');
+      const summary = ensurePersonaManager().getLatest('resume');
       return { success: true, summary };
     } catch (error: any) {
-      return { success: false, error: error?.message ?? 'Failed to read persona.' };
+      return { success: false, error: formatPersonaError(error, 'Failed to read persona.') };
     }
   });
 
   safeHandle("persona:clear", async () => {
     try {
-      const { PersonaManager } = require('./persona/PersonaManager') as typeof import('./persona/PersonaManager');
-      PersonaManager.getInstance().clear('resume');
+      ensurePersonaManager().clear('resume');
       return { success: true };
     } catch (error: any) {
-      return { success: false, error: error?.message ?? 'Failed to clear persona.' };
+      return { success: false, error: formatPersonaError(error, 'Failed to clear persona.') };
     }
   });
 
@@ -3536,4 +3692,3 @@ export function initializeIpcHandlers(appState: AppState): void {
     }
   })
 }
-

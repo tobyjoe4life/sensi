@@ -8,7 +8,6 @@ const UpdateBanner: React.FC = () => {
     const [downloadProgress, setDownloadProgress] = useState(0);
     const [status, setStatus] = useState<'idle' | 'downloading' | 'ready' | 'error' | 'instructions'>('idle');
     const [errorMessage, setErrorMessage] = useState<string | null>(null);
-    const [instructionsArch, setInstructionsArch] = useState<'arm64' | 'x64' | null>(null);
 
     useEffect(() => {
         // Listen for update available
@@ -82,27 +81,8 @@ const UpdateBanner: React.FC = () => {
     }, []);
 
     const handleInstall = async () => {
-        if (window.electronAPI.platform === 'darwin') {
-            try {
-                const arch = await window.electronAPI.getArch();
-                const isArm = arch === 'arm64';
-                const dmgSuffix = isArm ? 'arm64' : 'x64';
-                setInstructionsArch(dmgSuffix);
-                const version = updateInfo?.version ? updateInfo.version.replace('v', '') : '2.0.8';
-                // sensi M2-T3: updater disabled. Upstream GitHub release URL removed.
-                const url = `about:blank#sensi-updater-disabled-v${version}-${dmgSuffix}`;
-                window.electronAPI.openExternal(url);
-                setStatus('instructions');
-            } catch (err) {
-                console.error("Failed to get arch", err);
-                setStatus('downloading');
-                window.electronAPI.downloadUpdate();
-            }
-        } else {
-            setStatus('downloading');
-            // Trigger download via IPC
-            window.electronAPI.downloadUpdate();
-        }
+        setStatus('downloading');
+        window.electronAPI.downloadUpdate();
     };
 
     const handleDismiss = () => {
@@ -122,7 +102,6 @@ const UpdateBanner: React.FC = () => {
             downloadProgress={downloadProgress}
             status={status}
             errorMessage={errorMessage}
-            instructionsArch={instructionsArch}
         />
     );
 };

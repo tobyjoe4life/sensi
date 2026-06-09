@@ -11,16 +11,17 @@
  *      outputDimensionality: 768 (BYOK). KNOWLEDGE-FIX-02 swapped
  *      this from the earlier text-embedding-004 default after that
  *      model started returning 404 from v1beta for new keys.
- *   3. Unsupported: OpenAI text-embedding-3-small (1536-dim — would
- *      break the fixed 768-dim vec0 schema from M4-T1). No dimension
- *      reduction shim, no projection layer, no mixed-dim storage. If
- *      neither Ollama nor Gemini is available, embed() throws.
+ *   3. Cloud fallback: OpenAI text-embedding-3-small with dimensions: 768
+ *      (BYOK). The request-level dimensions override preserves the fixed
+ *      M4 vec0 schema while giving users another ingest provider.
  *
  * Provider selection runs per embed() call:
  *   - Probe Ollama with a 500 ms timeout against /api/tags
  *   - If reachable → use Ollama
  *   - Else → read CredentialsManager.getGeminiApiKey()
  *   - If present → use Gemini
+ *   - Else → read CredentialsManager.getOpenaiApiKey()
+ *   - If present → use OpenAI
  *   - Else → KnowledgeEmbeddingProviderUnavailableError
  *
  * Tests inject deps via the constructor to avoid real network — see the
@@ -32,6 +33,8 @@
  *   - Gemini: https://generativelanguage.googleapis.com (already used by
  *     LLMHelper chat paths — M4-T5 adds the embeddings endpoint under
  *     the same host/credential, so no new trust boundary)
+ *   - OpenAI: https://api.openai.com (already used by OpenAI chat/STT
+ *     paths when configured)
  */
 
 import { CredentialsManager } from '../services/CredentialsManager';
@@ -41,9 +44,9 @@ import { CredentialsManager } from '../services/CredentialsManager';
 // ─────────────────────────────────────────────────────────────────────────
 
 /**
- * Thrown when neither Ollama nor Gemini can produce embeddings right now:
+ * Thrown when neither Ollama, Gemini, nor OpenAI can produce embeddings right now:
  *   - Ollama is unreachable AND
- *   - no Gemini API key is configured in CredentialsManager
+ *   - no Gemini or OpenAI API key is configured in CredentialsManager
  */
 export class KnowledgeEmbeddingProviderUnavailableError extends Error {
     constructor(message: string) {
@@ -83,7 +86,7 @@ export class KnowledgeEmbeddingDimensionError extends Error {
 // ─────────────────────────────────────────────────────────────────────────
 
 export interface EmbeddingConfig {
-    provider: 'ollama' | 'gemini';
+    provider: 'ollama' | 'gemini' | 'openai';
     model: string;
     dimension: 768;
 }
@@ -97,7 +100,9 @@ export interface EmbeddingAdapterDeps {
     probeOllama?: () => Promise<boolean>;
     embedWithOllama?: (texts: readonly string[]) => Promise<Float32Array[]>;
     embedWithGemini?: (texts: readonly string[], apiKey: string) => Promise<Float32Array[]>;
+    embedWithOpenAI?: (texts: readonly string[], apiKey: string) => Promise<Float32Array[]>;
     getGeminiApiKey?: () => string | null;
+    getOpenaiApiKey?: () => string | null;
 }
 
 // M4 dimension invariant — matches M4-T1 vec0 schema (float[768]) and
@@ -124,6 +129,11 @@ const GEMINI_EMBEDDING_OUTPUT_DIM = 768;
 const GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com';
 const GEMINI_EMBED_TIMEOUT_MS = 30_000;
 
+const OPENAI_EMBEDDING_MODEL = 'text-embedding-3-small';
+const OPENAI_EMBEDDING_OUTPUT_DIM = 768;
+const OPENAI_BASE_URL = 'https://api.openai.com';
+const OPENAI_EMBED_TIMEOUT_MS = 30_000;
+
 // ─────────────────────────────────────────────────────────────────────────
 // EmbeddingAdapter
 // ─────────────────────────────────────────────────────────────────────────
@@ -133,15 +143,21 @@ export class EmbeddingAdapter {
     private readonly probeOllama: () => Promise<boolean>;
     private readonly embedWithOllama: (texts: readonly string[]) => Promise<Float32Array[]>;
     private readonly embedWithGemini: (texts: readonly string[], apiKey: string) => Promise<Float32Array[]>;
+    private readonly embedWithOpenAI: (texts: readonly string[], apiKey: string) => Promise<Float32Array[]>;
     private readonly getGeminiApiKey: () => string | null;
+    private readonly getOpenaiApiKey: () => string | null;
 
     constructor(deps: EmbeddingAdapterDeps = {}) {
         this.probeOllama = deps.probeOllama ?? probeOllamaDefault;
         this.embedWithOllama = deps.embedWithOllama ?? embedWithOllamaDefault;
         this.embedWithGemini = deps.embedWithGemini ?? embedWithGeminiDefault;
+        this.embedWithOpenAI = deps.embedWithOpenAI ?? embedWithOpenAIDefault;
         this.getGeminiApiKey =
             deps.getGeminiApiKey ??
             ((): string | null => CredentialsManager.getInstance().getGeminiApiKey() ?? null);
+        this.getOpenaiApiKey =
+            deps.getOpenaiApiKey ??
+            ((): string | null => CredentialsManager.getInstance().getOpenaiApiKey() ?? null);
     }
 
     /**
@@ -184,18 +200,28 @@ export class EmbeddingAdapter {
             };
         } else {
             const key = this.getGeminiApiKey();
-            if (!key) {
+            const openaiKey = this.getOpenaiApiKey();
+            if (!key && !openaiKey) {
                 throw new KnowledgeEmbeddingProviderUnavailableError(
-                    'No embedding provider available: Ollama unreachable and no Gemini API key configured. ' +
-                        'Start Ollama with `ollama pull nomic-embed-text` + `ollama serve`, or configure a Gemini API key in Settings → AI Providers.'
+                    'No embedding provider available: Ollama unreachable and no Gemini or OpenAI API key configured. ' +
+                        'Start Ollama with `ollama pull nomic-embed-text` + `ollama serve`, or configure a Gemini or OpenAI API key in Settings -> AI Providers.'
                 );
             }
-            vectors = await this.embedWithGemini(trimmed, key);
-            resolvedConfig = {
-                provider: 'gemini',
-                model: GEMINI_EMBEDDING_MODEL,
-                dimension: M4_EMBEDDING_DIM,
-            };
+            if (key) {
+                vectors = await this.embedWithGemini(trimmed, key);
+                resolvedConfig = {
+                    provider: 'gemini',
+                    model: GEMINI_EMBEDDING_MODEL,
+                    dimension: M4_EMBEDDING_DIM,
+                };
+            } else {
+                vectors = await this.embedWithOpenAI(trimmed, openaiKey!);
+                resolvedConfig = {
+                    provider: 'openai',
+                    model: OPENAI_EMBEDDING_MODEL,
+                    dimension: M4_EMBEDDING_DIM,
+                };
+            }
         }
 
         // Post-condition validation: provider must return one vector per
@@ -251,9 +277,17 @@ export class EmbeddingAdapter {
                 dimension: M4_EMBEDDING_DIM,
             };
         }
+        const openaiKey = this.getOpenaiApiKey();
+        if (openaiKey) {
+            return {
+                provider: 'openai',
+                model: OPENAI_EMBEDDING_MODEL,
+                dimension: M4_EMBEDDING_DIM,
+            };
+        }
         throw new KnowledgeEmbeddingProviderUnavailableError(
-            'resolveProvider: Ollama unreachable and no Gemini API key configured. ' +
-                'Start Ollama (`ollama serve`) or set a Gemini API key in Settings → AI Providers.'
+            'resolveProvider: Ollama unreachable and no Gemini or OpenAI API key configured. ' +
+                'Start Ollama (`ollama serve`) or set a Gemini or OpenAI API key in Settings -> AI Providers.'
         );
     }
 
@@ -400,4 +434,47 @@ async function embedWithGeminiDefault(
         );
     }
     return json.embeddings.map((e) => Float32Array.from(e.values));
+}
+
+async function embedWithOpenAIDefault(
+    texts: readonly string[],
+    apiKey: string
+): Promise<Float32Array[]> {
+    const res = await fetch(`${OPENAI_BASE_URL}/v1/embeddings`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+            model: OPENAI_EMBEDDING_MODEL,
+            input: texts,
+            dimensions: OPENAI_EMBEDDING_OUTPUT_DIM,
+            encoding_format: 'float',
+        }),
+        signal: AbortSignal.timeout(OPENAI_EMBED_TIMEOUT_MS),
+    });
+    if (!res.ok) {
+        const errText = await res.text().catch(() => '<unreadable body>');
+        throw new KnowledgeEmbeddingRequestError(
+            `OpenAI embeddings failed: ${res.status} ${res.statusText} - ${errText.slice(0, 200)}`
+        );
+    }
+    const json = (await res.json()) as {
+        data?: Array<{ index?: number; embedding?: number[] }>;
+    };
+    if (!json.data || !Array.isArray(json.data)) {
+        throw new KnowledgeEmbeddingRequestError(
+            'OpenAI embeddings returned malformed response (missing data[])'
+        );
+    }
+    const sorted = [...json.data].sort((a, b) => (a.index ?? 0) - (b.index ?? 0));
+    return sorted.map((entry) => {
+        if (!Array.isArray(entry.embedding)) {
+            throw new KnowledgeEmbeddingRequestError(
+                'OpenAI embeddings returned malformed response (missing embedding[])'
+            );
+        }
+        return Float32Array.from(entry.embedding);
+    });
 }

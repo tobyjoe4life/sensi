@@ -1,6 +1,7 @@
 import { app } from 'electron';
 import fs from 'fs';
 import path from 'path';
+import type { InterviewProfile } from '../interview/InterviewProfile';
 
 export interface AppSettings {
     // Only boot-critical or non-encrypted settings should live here.
@@ -42,6 +43,9 @@ export interface AppSettings {
     // Used to know whether `lowResourceMode` was auto-seeded (never
     // overwrite a user-set value).
     hardwareDetectedAt?: number;
+    // Interview answer shaping. Stored as plain profile/preferences only;
+    // provider credentials and extracted document contents live elsewhere.
+    interviewProfile?: InterviewProfile;
 }
 
 export class SettingsManager {

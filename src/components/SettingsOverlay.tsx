@@ -11,6 +11,7 @@ import {
 import { AboutSection } from './AboutSection';
 import { HelpSettings } from './settings/HelpSettings';
 import { AIProvidersSettings } from './settings/AIProvidersSettings';
+import { InterviewSettings } from './settings/InterviewSettings';
 import { KnowledgeSettings } from './settings/KnowledgeSettings';
 import { PersonaSettings } from './settings/PersonaSettings';
 import { AccountSettings } from './settings/AccountSettings';
@@ -1430,6 +1431,12 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                         className={`w-full text-left px-3 py-2 rounded-lg text-sm font-medium transition-colors flex items-center gap-3 ${activeTab === 'ai-providers' ? 'bg-bg-item-active text-text-primary' : 'text-text-secondary hover:text-text-primary hover:bg-bg-item-active/50'}`}
                                     >
                                         <FlaskConical size={16} /> AI Providers
+                                    </button>
+                                    <button
+                                        onClick={() => setActiveTab('interview')}
+                                        className={`w-full text-left px-3 py-2 rounded-lg text-sm font-medium transition-colors flex items-center gap-3 ${activeTab === 'interview' ? 'bg-bg-item-active text-text-primary' : 'text-text-secondary hover:text-text-primary hover:bg-bg-item-active/50'}`}
+                                    >
+                                        <Briefcase size={16} /> Interview
                                     </button>
                                     <button
                                         onClick={() => setActiveTab('knowledge')}
@@ -2933,6 +2940,9 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                             )}
                             {activeTab === 'ai-providers' && (
                                 <AIProvidersSettings />
+                            )}
+                            {activeTab === 'interview' && (
+                                <InterviewSettings />
                             )}
                             {activeTab === 'knowledge' && (
                                 <KnowledgeSettings />

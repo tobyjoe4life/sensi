@@ -3,6 +3,82 @@ import { UNIVERSAL_WHAT_TO_ANSWER_PROMPT } from "./prompts";
 import { TemporalContext } from "./TemporalContextBuilder";
 import { IntentResult } from "./IntentClassifier";
 
+const REPEAT_FALLBACK = "Could you repeat that? I want to make sure I address your question properly.";
+
+const FORBIDDEN_WAITING_PHRASES = [
+    "take your time",
+    "no rush",
+    "whenever you're ready",
+    "whenever you are ready",
+    "i'll wait",
+    "i will wait",
+    "let me know when",
+];
+
+function normalizeWaitingText(text: string): string {
+    return text
+        .toLowerCase()
+        .replace(/[^\w'\s]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+function isForbiddenWaitingResponse(text: string): boolean {
+    const normalized = normalizeWaitingText(text);
+    return FORBIDDEN_WAITING_PHRASES.some(
+        phrase => normalized === phrase || normalized.startsWith(`${phrase} `)
+    );
+}
+
+function isPossibleForbiddenWaitingPrefix(text: string): boolean {
+    const normalized = normalizeWaitingText(text);
+    if (!normalized) return true;
+    if (isForbiddenWaitingResponse(text)) return true;
+    return FORBIDDEN_WAITING_PHRASES.some(phrase => phrase.startsWith(normalized));
+}
+
+function stripLeadingForbiddenWaitingPhrase(text: string): string | null {
+    const trimmed = text.trim();
+    const match = trimmed.match(
+        /^(?:take\s+your\s+time|no\s+rush|whenever\s+you(?:'|’)?re\s+ready|whenever\s+you\s+are\s+ready|i(?:'|’)?ll\s+wait|i\s+will\s+wait|let\s+me\s+know\s+when)[\s.!?,:;-]*/i
+    );
+    if (!match) return null;
+
+    const rest = trimmed.slice(match[0].length).trim();
+    return rest.length >= 5 ? rest : REPEAT_FALLBACK;
+}
+
+async function* guardForbiddenWaitingResponse(
+    stream: AsyncGenerator<string, void, unknown>
+): AsyncGenerator<string, void, unknown> {
+    let initialBuffer = "";
+    let released = false;
+
+    for await (const chunk of stream) {
+        if (released) {
+            yield chunk;
+            continue;
+        }
+
+        initialBuffer += chunk;
+        if (!isPossibleForbiddenWaitingPrefix(initialBuffer)) {
+            released = true;
+            yield initialBuffer;
+            initialBuffer = "";
+        }
+    }
+
+    if (!released && initialBuffer.length > 0) {
+        if (isForbiddenWaitingResponse(initialBuffer)) {
+            yield stripLeadingForbiddenWaitingPhrase(initialBuffer) ?? REPEAT_FALLBACK;
+            return;
+        }
+
+        const stripped = stripLeadingForbiddenWaitingPhrase(initialBuffer);
+        yield stripped ?? initialBuffer;
+    }
+}
+
 /**
  * sensi M4-T7: optional knowledge-context hook. Called just before the
  * rest of the context parts are assembled. Takes the cleaned transcript
@@ -32,11 +108,13 @@ export type KnowledgeContextFn = (query: string, eventId?: string) => Promise<st
  * block.
  */
 export type PersonaContextFn = (eventId?: string) => string;
+export type InterviewProfileContextFn = (query: string, intentResult?: IntentResult) => string;
 
 export class WhatToAnswerLLM {
     private llmHelper: LLMHelper;
     private knowledgeContextFn: KnowledgeContextFn | null;
     private personaContextFn: PersonaContextFn | null;
+    private interviewProfileContextFn: InterviewProfileContextFn | null;
     /**
      * sensi M7 / KNOWLEDGE-02: active meeting's calendar event id.
      * `IntelligenceEngine` pushes this whenever a meeting begins so the
@@ -48,11 +126,13 @@ export class WhatToAnswerLLM {
     constructor(
         llmHelper: LLMHelper,
         knowledgeContextFn?: KnowledgeContextFn,
-        personaContextFn?: PersonaContextFn
+        personaContextFn?: PersonaContextFn,
+        interviewProfileContextFn?: InterviewProfileContextFn
     ) {
         this.llmHelper = llmHelper;
         this.knowledgeContextFn = knowledgeContextFn ?? null;
         this.personaContextFn = personaContextFn ?? null;
+        this.interviewProfileContextFn = interviewProfileContextFn ?? null;
     }
 
     setActiveEventId(eventId: string | null): void {
@@ -81,9 +161,29 @@ export class WhatToAnswerLLM {
 
             let contextParts: string[] = [];
 
-            // sensi M7 / PERSONA-01/02: persona block goes FIRST so every
-            // downstream block (knowledge, intent, history, transcript)
-            // frames against "who you are (for this meeting)". When the
+            // Interview profile goes first: target company/role and sector
+            // policy should frame the later persona and knowledge evidence.
+            if (this.interviewProfileContextFn) {
+                try {
+                    const interviewBlock = this.interviewProfileContextFn(
+                        cleanedTranscript,
+                        intentResult
+                    );
+                    if (interviewBlock && interviewBlock.length > 0) {
+                        contextParts.push(interviewBlock);
+                    }
+                } catch (e) {
+                    const msg = e instanceof Error ? e.message : String(e);
+                    console.warn(
+                        '[WhatToAnswerLLM] interviewProfileContextFn threw, continuing without interview profile:',
+                        msg
+                    );
+                }
+            }
+
+            // sensi M7 / PERSONA-01/02: persona block follows the target
+            // interview profile so the LLM has company/role policy first,
+            // then "who you are (for this meeting)". When the
             // active meeting has a JD attached, this returns the combined
             // persona×JD block with gaps + talking points. Best-effort —
             // any error degrades to no persona, live-assist continues.
@@ -153,11 +253,12 @@ ANSWER SHAPE: ${intentResult.answerShape}
             // Note: WhatToAnswer has a very specific prompt. 
             // We should use UNIVERSAL_WHAT_TO_ANSWER_PROMPT as override
 
-            yield* this.llmHelper.streamChat(fullMessage, imagePaths, undefined, UNIVERSAL_WHAT_TO_ANSWER_PROMPT);
+            const stream = this.llmHelper.streamChat(fullMessage, imagePaths, undefined, UNIVERSAL_WHAT_TO_ANSWER_PROMPT);
+            yield* guardForbiddenWaitingResponse(stream);
 
         } catch (error) {
             console.error("[WhatToAnswerLLM] Stream failed:", error);
-            yield "Could you repeat that? I want to make sure I address your question properly.";
+            yield REPEAT_FALLBACK;
         }
     }
 }

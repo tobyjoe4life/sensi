@@ -23,11 +23,11 @@ export function errorTypeToMessage(errorType: KnowledgeIpcErrorType): string {
         case 'ingest_failed':
             return 'Could not ingest this document. Check that the file exists and is a PDF, DOCX, Markdown, or plain-text file.';
         case 'query_failed':
-            return 'The knowledge query failed. Try again, or check that your embedding provider (Ollama or Gemini) is reachable.';
+            return 'The knowledge query failed. Try again, or check that your embedding provider (Ollama, Gemini, or OpenAI) is reachable.';
         case 'model_mismatch':
             return 'Stored documents use a different embedding model than the active one. Re-enable the original provider or re-ingest these documents.';
         case 'provider_unavailable':
-            return 'No embedding provider is available. Start Ollama (`ollama serve`) or add a Gemini API key in Settings → AI Providers.';
+            return 'No embedding provider is available. Start Ollama (`ollama serve`) or add a Gemini or OpenAI API key in Settings -> AI Providers.';
         case 'not_found':
             return 'Document not found. It may have been deleted.';
         case 'dimension_mismatch':

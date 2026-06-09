@@ -108,7 +108,7 @@ export type IngestDocumentResult =
           documentId: string;
           chunkCount: number;
           embeddingModel: string;
-          embeddingProvider: 'ollama' | 'gemini';
+          embeddingProvider: 'ollama' | 'gemini' | 'openai';
       }
     | KnowledgeIpcFailure;
 
@@ -313,7 +313,7 @@ function translateError(e: unknown, channel: string): KnowledgeIpcFailure {
             errorType: 'model_mismatch',
             error:
                 'Stored documents are embedded with a different model than the one active right now. ' +
-                'Start the original embedding provider (Ollama for nomic-embed-text, or configure a Gemini API key for gemini-embedding-001), ' +
+                'Start the original embedding provider (Ollama for nomic-embed-text, Gemini for gemini-embedding-001, or OpenAI for text-embedding-3-small), ' +
                 'or re-ingest these documents with your current provider.',
         };
     }
@@ -349,7 +349,7 @@ function translateError(e: unknown, channel: string): KnowledgeIpcFailure {
             errorType: 'provider_unavailable',
             error:
                 'No embedding provider available. Start Ollama (`ollama serve`) ' +
-                'or configure a Gemini API key in Settings → AI Providers.',
+                'or configure a Gemini or OpenAI API key in Settings -> AI Providers.',
         };
     }
     if (e instanceof KnowledgeEmbeddingRequestError) {
