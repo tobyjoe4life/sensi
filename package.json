@@ -1,6 +1,6 @@
 {
   "name": "sensi",
-  "version": "2.18.2",
+  "version": "2.18.3",
   "main": "dist-electron/electron/main.js",
   "description": "sensi is a personal desktop AI copilot for meetings, interviews, and live knowledge work.",
   "scripts": {
@@ -144,7 +144,7 @@
       {
         "provider": "github",
         "owner": "tobyjoe4life",
-        "repo": "sensi",
+        "repo": "sensi-updates",
         "releaseType": "release"
       }
     ]

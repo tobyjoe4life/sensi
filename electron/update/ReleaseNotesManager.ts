@@ -18,7 +18,7 @@ export class ReleaseNotesManager {
     private static instance: ReleaseNotesManager;
     private cachedNotes: ParsedReleaseNotes | null = null;
     private readonly repoOwner = "tobyjoe4life";
-    private readonly repoName = "sensi";
+    private readonly repoName = "sensi-updates";
 
     private constructor() { }
 
