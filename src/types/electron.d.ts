@@ -2,6 +2,15 @@
 // Imported via the @providers Vite alias (see vite.config.mts + tsconfig paths).
 import type { ProviderId, ProviderStatus } from '@providers/types'
 
+export type AnswerModeIpc = 'normal' | 'collaborative_coding'
+
+export interface StreamGeminiChatOptionsIpc {
+  skipSystemPrompt?: boolean
+  ignoreKnowledgeMode?: boolean
+  useInterviewContext?: boolean
+  answerMode?: AnswerModeIpc
+}
+
 export interface ElectronAPI {
   updateContentDimensions: (dimensions: {
     width: number
@@ -163,6 +172,9 @@ export interface ElectronAPI {
   getActionButtonMode: () => Promise<'recap' | 'brainstorm'>
   setActionButtonMode: (mode: 'recap' | 'brainstorm') => Promise<{ success: boolean }>
   onActionButtonModeChanged: (callback: (mode: 'recap' | 'brainstorm') => void) => () => void
+  getAnswerCodingMode: () => Promise<boolean>
+  setAnswerCodingMode: (enabled: boolean) => Promise<{ success: boolean; enabled?: boolean; error?: string }>
+  onAnswerCodingModeChanged: (callback: (enabled: boolean) => void) => () => void
 
   // Meeting Lifecycle
   startMeeting: (metadata?: any) => Promise<{ success: boolean; error?: string }>
@@ -198,7 +210,7 @@ export interface ElectronAPI {
   onRollingStreamCancelled: (callback: () => void) => () => void;
 
   // Streaming listeners
-  streamGeminiChat: (message: string, imagePaths?: string[], context?: string, options?: { skipSystemPrompt?: boolean, ignoreKnowledgeMode?: boolean, useInterviewContext?: boolean }) => Promise<void>
+  streamGeminiChat: (message: string, imagePaths?: string[], context?: string, options?: StreamGeminiChatOptionsIpc) => Promise<void>
   onGeminiStreamToken: (callback: (token: string) => void) => () => void
   onGeminiStreamDone: (callback: () => void) => () => void
   onGeminiStreamError: (callback: (error: string) => void) => () => void;

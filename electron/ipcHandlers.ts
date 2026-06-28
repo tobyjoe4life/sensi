@@ -7,10 +7,20 @@ import { DatabaseManager } from "./db/DatabaseManager"; // Import Database Manag
 import * as path from "path";
 import * as fs from "fs";
 import { AudioDevices } from "./audio/AudioDevices";
-import { UNIVERSAL_ANSWER_PROMPT } from "./llm/prompts";
+import { getAnswerSystemPrompt, type AnswerPromptMode } from "./llm/prompts";
 
 
 import { RECOGNITION_LANGUAGES, AI_RESPONSE_LANGUAGES } from "./config/languages"
+
+type ChatStreamOptions = {
+  skipSystemPrompt?: boolean;
+  ignoreKnowledgeMode?: boolean;
+  useInterviewContext?: boolean;
+  answerMode?: AnswerPromptMode;
+};
+
+const normalizeAnswerPromptMode = (mode?: AnswerPromptMode): AnswerPromptMode =>
+  mode === 'collaborative_coding' ? 'collaborative_coding' : 'normal';
 
 export function initializeIpcHandlers(appState: AppState): void {
   const safeHandle = (channel: string, listener: (event: any, ...args: any[]) => Promise<any> | any) => {
@@ -442,7 +452,7 @@ export function initializeIpcHandlers(appState: AppState): void {
         let collected = "";
         const stream = appState.processingHelper
           .getLLMHelper()
-          .streamChat(message, imagePaths, context, UNIVERSAL_ANSWER_PROMPT, true);
+          .streamChat(message, imagePaths, context, getAnswerSystemPrompt('normal'), true);
         for await (const token of stream) collected += token;
         result = collected.trim();
       } else {
@@ -491,7 +501,7 @@ export function initializeIpcHandlers(appState: AppState): void {
   // that a newer stream has taken over.
   let _chatStreamId = 0;
 
-  safeHandle("gemini-chat-stream", async (event, message: string, imagePaths?: string[], context?: string, options?: { skipSystemPrompt?: boolean, ignoreKnowledgeMode?: boolean, useInterviewContext?: boolean }) => {
+  safeHandle("gemini-chat-stream", async (event, message: string, imagePaths?: string[], context?: string, options?: ChatStreamOptions) => {
     try {
       console.log("[IPC] gemini-chat-stream started using LLMHelper.streamChat");
       const llmHelper = appState.processingHelper.getLLMHelper();
@@ -531,10 +541,11 @@ export function initializeIpcHandlers(appState: AppState): void {
 
       try {
         // USE streamChat which handles routing
+        const answerMode = normalizeAnswerPromptMode(options?.answerMode);
         const systemPromptOverride = options?.skipSystemPrompt
           ? ""
           : options?.useInterviewContext
-            ? UNIVERSAL_ANSWER_PROMPT
+            ? getAnswerSystemPrompt(answerMode)
             : undefined;
         const ignoreKnowledgeMode = options?.ignoreKnowledgeMode ?? options?.useInterviewContext === true;
         const stream = llmHelper.streamChat(message, imagePaths, context, systemPromptOverride, ignoreKnowledgeMode);
@@ -2421,6 +2432,28 @@ export function initializeIpcHandlers(appState: AppState): void {
     });
 
     return { success: true };
+  });
+
+  // Answer Coding Mode (Collaborative coding toggle for the Answer flow)
+  safeHandle("get-answer-coding-mode", () => {
+    const { SettingsManager } = require('./services/SettingsManager');
+    const sm = SettingsManager.getInstance();
+    return sm.get('answerCodingModeEnabled') === true;
+  });
+
+  safeHandle("set-answer-coding-mode", (_, enabled: boolean) => {
+    const { SettingsManager } = require('./services/SettingsManager');
+    const sm = SettingsManager.getInstance();
+    const next = enabled === true;
+    sm.set('answerCodingModeEnabled', next);
+
+    BrowserWindow.getAllWindows().forEach(win => {
+      if (!win.isDestroyed()) {
+        win.webContents.send('answer-coding-mode-changed', next);
+      }
+    });
+
+    return { success: true, enabled: next };
   });
 
   safeHandle("interview-profile:get", () => {

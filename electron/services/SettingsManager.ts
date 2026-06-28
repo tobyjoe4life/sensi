@@ -10,6 +10,7 @@ export interface AppSettings {
     isUndetectable?: boolean;
     verboseLogging?: boolean;
     actionButtonMode?: 'recap' | 'brainstorm';
+    answerCodingModeEnabled?: boolean;
     groqFastTextMode?: boolean;
     knowledgeMode?: boolean;
     // M5-T5: rolling-response trigger cadence.

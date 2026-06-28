@@ -49,7 +49,7 @@ import 'katex/dist/katex.min.css';
 import { useShortcuts } from '../hooks/useShortcuts';
 import { useResolvedTheme } from '../hooks/useResolvedTheme';
 import { getOverlayAppearance, OVERLAY_OPACITY_DEFAULT } from '../lib/overlayAppearance';
-import type { InterviewAnswerStyleIpc } from '../types/electron';
+import type { InterviewAnswerStyleIpc, StreamGeminiChatOptionsIpc } from '../types/electron';
 
 interface Message {
     id: string;
@@ -175,6 +175,7 @@ const SensiInterface: React.FC<SensiInterfaceProps> = ({ onEndMeeting, overlayOp
 
     // Dynamic Action Button Mode (Recap vs Brainstorm)
     const [actionButtonMode, setActionButtonMode] = useState<'recap' | 'brainstorm'>('recap');
+    const [answerCodingModeEnabled, setAnswerCodingModeEnabled] = useState(false);
     const [answerStyle, setAnswerStyle] = useState<InterviewAnswerStyleIpc>('auto');
 
     // sensi M7 / RESEARCH-01: standalone Tavily research chip
@@ -192,6 +193,17 @@ const SensiInterface: React.FC<SensiInterfaceProps> = ({ onEndMeeting, overlayOp
         // Listen for live changes from SettingsPopup / IPC
         const unsubscribe = window.electronAPI?.onActionButtonModeChanged?.((mode: 'recap' | 'brainstorm') => {
             setActionButtonMode(mode);
+        });
+        return () => { unsubscribe?.(); };
+    }, []);
+
+    useEffect(() => {
+        window.electronAPI?.getAnswerCodingMode?.()
+            .then((enabled) => setAnswerCodingModeEnabled(enabled === true))
+            .catch(() => {});
+
+        const unsubscribe = window.electronAPI?.onAnswerCodingModeChanged?.((enabled: boolean) => {
+            setAnswerCodingModeEnabled(enabled === true);
         });
         return () => { unsubscribe?.(); };
     }, []);
@@ -224,6 +236,48 @@ const SensiInterface: React.FC<SensiInterfaceProps> = ({ onEndMeeting, overlayOp
                 }
             })
             .catch(() => {});
+    };
+
+    const handleAnswerCodingModeToggle = () => {
+        const next = !answerCodingModeEnabled;
+        setAnswerCodingModeEnabled(next);
+        window.electronAPI?.setAnswerCodingMode?.(next)
+            .then((res) => {
+                if (res?.success && typeof res.enabled === 'boolean') {
+                    setAnswerCodingModeEnabled(res.enabled);
+                }
+            })
+            .catch(() => {
+                setAnswerCodingModeEnabled(!next);
+            });
+    };
+
+    const getAnswerStreamOptions = (codingMode: boolean): StreamGeminiChatOptionsIpc => (
+        codingMode
+            ? { useInterviewContext: true, answerMode: 'collaborative_coding' }
+            : { useInterviewContext: true }
+    );
+
+    const buildCollaborativeCodingRequestContext = (
+        request: string,
+        hasImages: boolean,
+        extraContext?: string
+    ): string => {
+        const parts = [
+            'Collaborative Coding mode is ON for this Answer request.',
+            `User request or transcript: "${request || 'No spoken text provided.'}"`,
+            hasImages
+                ? 'Use the attached screenshot as coding problem context.'
+                : 'Use the transcript and live conversation context as coding problem context.',
+            'If the problem statement is incomplete, state key assumptions and proceed unless solving is impossible.',
+        ];
+
+        const trimmedContext = extraContext?.trim();
+        if (trimmedContext) {
+            parts.push(`Live conversation context:\n${trimmedContext}`);
+        }
+
+        return parts.join('\n\n');
     };
 
     const codeTheme = isLightTheme ? oneLight : vscDarkPlus;
@@ -1465,8 +1519,11 @@ const SensiInterface: React.FC<SensiInterfaceProps> = ({ onEndMeeting, overlayOp
 
             try {
                 let prompt = '';
+                const codingMode = answerCodingModeEnabled;
 
-                if (currentAttachments.length > 0) {
+                if (codingMode) {
+                    prompt = buildCollaborativeCodingRequestContext(question, currentAttachments.length > 0);
+                } else if (currentAttachments.length > 0) {
                     // Image + Voice Context
                     prompt = `You are a helper. The user has provided a screenshot and a spoken question/command.
 User said: "${question}"
@@ -1497,7 +1554,12 @@ Provide only the answer, nothing else.`;
 
                 // Call Streaming API: message = question, context = instructions
                 requestStartTimeRef.current = Date.now();
-                await window.electronAPI.streamGeminiChat(question, currentAttachments.length > 0 ? currentAttachments.map(s => s.path) : undefined, prompt, { useInterviewContext: true });
+                await window.electronAPI.streamGeminiChat(
+                    codingMode && !question ? 'Analyze this screenshot as a coding interview problem.' : question,
+                    currentAttachments.length > 0 ? currentAttachments.map(s => s.path) : undefined,
+                    prompt,
+                    getAnswerStreamOptions(codingMode)
+                );
 
             } catch (err) {
                 // Initial invocation failing (e.g. IPC error before stream starts)
@@ -1573,8 +1635,9 @@ Provide only the answer, nothing else.`;
         setIsProcessing(true);
 
         try {
+            const codingMode = answerCodingModeEnabled;
             // JIT RAG pre-flight: try to use indexed meeting context first
-            if (currentAttachments.length === 0) {
+            if (!codingMode && currentAttachments.length === 0) {
                 const ragResult = await window.electronAPI.ragQueryLive?.(userText || '');
                 if (ragResult?.success) {
                     // JIT RAG handled it — response streamed via rag:stream-chunk events
@@ -1584,11 +1647,15 @@ Provide only the answer, nothing else.`;
 
             // Pass imagePath if attached, AND conversation context
             requestStartTimeRef.current = Date.now();
+            const streamMessage = userText || (codingMode ? 'Analyze this screenshot as a coding interview problem.' : 'Analyze this screenshot');
+            const streamContext = codingMode
+                ? buildCollaborativeCodingRequestContext(streamMessage, currentAttachments.length > 0, conversationContext)
+                : conversationContext;
             await window.electronAPI.streamGeminiChat(
-                userText || 'Analyze this screenshot',
+                streamMessage,
                 currentAttachments.length > 0 ? currentAttachments.map(s => s.path) : undefined,
-                conversationContext, // Pass context so "answer this" works
-                { useInterviewContext: true }
+                streamContext, // Pass context so "answer this" works
+                getAnswerStreamOptions(codingMode)
             );
         } catch (err) {
             setIsProcessing(false);
@@ -2507,6 +2574,22 @@ Provide only the answer, nothing else.`;
                                     <Search className="w-3 h-3 opacity-70" />
                                 </button>
                                 <button
+                                    type="button"
+                                    onClick={handleAnswerCodingModeToggle}
+                                    aria-pressed={answerCodingModeEnabled}
+                                    aria-label={answerCodingModeEnabled ? 'Turn off Coding mode for Answer' : 'Turn on Coding mode for Answer'}
+                                    title={answerCodingModeEnabled ? 'Coding mode on: Answer uses collaborative coding guidance' : 'Turn on collaborative coding guidance for Answer'}
+                                    className={`flex items-center justify-center gap-1 px-2 py-1.5 rounded-full text-[11px] font-medium border transition-all active:scale-95 duration-200 interaction-base interaction-press whitespace-nowrap shrink-0 ${
+                                        answerCodingModeEnabled
+                                            ? 'bg-emerald-500/15 text-emerald-300 ring-1 ring-emerald-500/25 border-emerald-500/25'
+                                            : quickActionClass
+                                    }`}
+                                    style={answerCodingModeEnabled ? undefined : appearance.chipStyle}
+                                >
+                                    <Code className="w-3 h-3 opacity-80" />
+                                    Coding
+                                </button>
+                                <button
                                     onClick={handleAnswerNow}
                                     className={`flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-full text-[11px] font-medium border transition-all active:scale-95 duration-200 interaction-base interaction-press min-w-[74px] whitespace-nowrap shrink-0 ${isManualRecording
                                         ? 'bg-red-500/10 text-red-400 ring-1 ring-red-500/20 border-red-500/20'
@@ -2520,7 +2603,9 @@ Provide only the answer, nothing else.`;
                                             Stop
                                         </>
                                     ) : (
-                                        <><Zap className="w-3 h-3 opacity-70" /> Answer</>
+                                        answerCodingModeEnabled
+                                            ? <><Code className="w-3 h-3 opacity-70" /> Answer</>
+                                            : <><Zap className="w-3 h-3 opacity-70" /> Answer</>
                                     )}
                                 </button>
                             </div>

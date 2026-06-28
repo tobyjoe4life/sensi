@@ -20,6 +20,14 @@ interface ProfileContextHealthIpc {
 type InterviewSector = 'general' | 'civil_service_public_sector'
 type InterviewStarPolicy = 'detected_competency' | 'always_in_sector' | 'manual'
 type InterviewAnswerStyle = 'auto' | 'concise' | 'elaborate' | 'star'
+type AnswerMode = 'normal' | 'collaborative_coding'
+
+interface StreamGeminiChatOptions {
+  skipSystemPrompt?: boolean
+  ignoreKnowledgeMode?: boolean
+  useInterviewContext?: boolean
+  answerMode?: AnswerMode
+}
 
 interface InterviewProfileIpc {
   enabled: boolean
@@ -157,6 +165,12 @@ interface ElectronAPI {
   submitManualQuestion: (question: string) => Promise<{ answer: string | null; question: string }>
   getIntelligenceContext: () => Promise<{ context: string; lastAssistantMessage: string | null; activeMode: string }>
   resetIntelligence: () => Promise<{ success: boolean; error?: string }>
+  getActionButtonMode: () => Promise<'recap' | 'brainstorm'>
+  setActionButtonMode: (mode: 'recap' | 'brainstorm') => Promise<{ success: boolean }>
+  onActionButtonModeChanged: (callback: (mode: 'recap' | 'brainstorm') => void) => () => void
+  getAnswerCodingMode: () => Promise<boolean>
+  setAnswerCodingMode: (enabled: boolean) => Promise<{ success: boolean; enabled?: boolean; error?: string }>
+  onAnswerCodingModeChanged: (callback: (enabled: boolean) => void) => () => void
 
   // Meeting Lifecycle
   startMeeting: (metadata?: any) => Promise<{ success: boolean; error?: string }>
@@ -230,7 +244,7 @@ interface ElectronAPI {
   onOverlayMousePassthroughChanged: (callback: (enabled: boolean) => void) => () => void
 
   // Streaming listeners
-  streamGeminiChat: (message: string, imagePaths?: string[], context?: string, options?: { skipSystemPrompt?: boolean, ignoreKnowledgeMode?: boolean, useInterviewContext?: boolean }) => Promise<void>
+  streamGeminiChat: (message: string, imagePaths?: string[], context?: string, options?: StreamGeminiChatOptions) => Promise<void>
   onGeminiStreamToken: (callback: (token: string) => void) => () => void
   onGeminiStreamDone: (callback: () => void) => () => void
   onGeminiStreamError: (callback: (error: string) => void) => () => void
@@ -786,6 +800,13 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.on('action-button-mode-changed', subscription);
     return () => { ipcRenderer.removeListener('action-button-mode-changed', subscription); };
   },
+  getAnswerCodingMode: () => ipcRenderer.invoke("get-answer-coding-mode"),
+  setAnswerCodingMode: (enabled: boolean) => ipcRenderer.invoke("set-answer-coding-mode", enabled),
+  onAnswerCodingModeChanged: (callback: (enabled: boolean) => void) => {
+    const subscription = (_: any, enabled: boolean) => callback(enabled);
+    ipcRenderer.on('answer-coding-mode-changed', subscription);
+    return () => { ipcRenderer.removeListener('answer-coding-mode-changed', subscription); };
+  },
 
   // Meeting Lifecycle
   startMeeting: (metadata?: any) => ipcRenderer.invoke("start-meeting", metadata),
@@ -936,7 +957,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
 
 
   // Streaming Chat
-  streamGeminiChat: (message: string, imagePaths?: string[], context?: string, options?: { skipSystemPrompt?: boolean, ignoreKnowledgeMode?: boolean, useInterviewContext?: boolean }) => ipcRenderer.invoke("gemini-chat-stream", message, imagePaths, context, options),
+  streamGeminiChat: (message: string, imagePaths?: string[], context?: string, options?: StreamGeminiChatOptions) => ipcRenderer.invoke("gemini-chat-stream", message, imagePaths, context, options),
 
   onGeminiStreamToken: (callback: (token: string) => void) => {
     const subscription = (_: any, token: string) => callback(token)
